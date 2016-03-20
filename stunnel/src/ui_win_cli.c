@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -40,26 +40,29 @@
 
 int main(int argc, char *argv[]) {
     static struct WSAData wsa_state;
-    char *c, stunnel_exe_path[MAX_PATH];
+    TCHAR *c, stunnel_exe_path[MAX_PATH];
+
+    tls_init(); /* initialize thread-local storage */
 
     /* set current working directory and engine path */
     GetModuleFileName(0, stunnel_exe_path, MAX_PATH);
-    c=strrchr(stunnel_exe_path, '\\'); /* last backslash */
+    c=_tcsrchr(stunnel_exe_path, TEXT('\\')); /* last backslash */
     if(c) /* found */
-        c[1]='\0'; /* truncate program name */
+        c[1]=TEXT('\0'); /* truncate program name */
 #ifndef _WIN32_WCE
     if(!SetCurrentDirectory(stunnel_exe_path)) {
-        fprintf(stderr, "Cannot set directory to %s", stunnel_exe_path);
+        /* log to stderr, as s_log() is not initialized */
+        _ftprintf(stderr, TEXT("Cannot set directory to %s"),
+            stunnel_exe_path);
         return 1;
     }
 #endif
-    _putenv_s("OPENSSL_ENGINES", stunnel_exe_path);
+    _tputenv(str_tprintf(TEXT("OPENSSL_ENGINES=%s"), stunnel_exe_path));
 
-    str_init(); /* initialize per-thread string management */
     if(WSAStartup(MAKEWORD(1, 1), &wsa_state))
         return 1;
     resolver_init();
-    main_initialize();
+    main_init();
     if(!main_configure(argc>1 ? argv[1] : NULL, argc>2 ? argv[2] : NULL))
         daemon_loop();
     main_cleanup();
@@ -68,7 +71,7 @@ int main(int argc, char *argv[]) {
 
 /**************************************** options callbacks */
 
-void ui_new_config(void) {
+void ui_config_reloaded(void) {
     /* no action */
 }
 
@@ -88,31 +91,29 @@ void ui_new_chain(const int section_number) {
     (void)section_number; /* skip warning about unused parameter */
 }
 
-void ui_clients(const int num) {
+void ui_clients(const long num) {
     (void)num; /* skip warning about unused parameter */
 }
 
 /**************************************** s_log callbacks */
 
-void message_box(const LPSTR text, const UINT type) {
-    LPTSTR tstr;
-
-    tstr=str2tstr(text);
-    MessageBox(NULL, tstr, TEXT("stunnel"), type);
-    str_free(tstr);
+void message_box(LPCTSTR text, const UINT type) {
+    MessageBox(NULL, text, TEXT("stunnel"), type);
 }
 
 void ui_new_log(const char *line) {
-#ifdef _WIN32_WCE
-    /* log to Windows CE debug output stream */
     LPTSTR tstr;
 
     tstr=str2tstr(line);
+#ifdef _WIN32_WCE
+    /* log to Windows CE debug output stream */
     RETAILMSG(TRUE, (TEXT("%s\r\n"), tstr));
-    str_free(tstr);
 #else
-    printf("%s\n", line);
+    /* use UTF-16 or native codepage rather than UTF-8 */
+    _ftprintf(stderr, TEXT("%s\r\n"), tstr);
+    fflush(stderr);
 #endif
+    str_free(tstr);
 }
 
 /**************************************** ctx callbacks */
@@ -125,7 +126,7 @@ int passwd_cb(char *buf, int size, int rwflag, void *userdata) {
     return 0; /* not implemented */
 }
 
-#ifdef HAVE_OSSL_ENGINE_H
+#ifndef OPENSSL_NO_ENGINE
 int pin_cb(UI *ui, UI_STRING *uis) {
     (void)ui; /* skip warning about unused parameter */
     (void)uis; /* skip warning about unused parameter */

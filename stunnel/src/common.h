@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -40,7 +40,6 @@
 
 #include "version.h"
 
-
 /**************************************** common constants */
 
 #define LIBWRAP_CLIENTS 5
@@ -49,7 +48,7 @@
 #define DEFAULT_STACK_SIZE 65536
 /* #define DEBUG_STACK_SIZE */
 
-/* I/O buffer size - 18432 is the maximum size of SSL record payload */
+/* I/O buffer size: 18432 (0x4800) is the maximum size of SSL record payload */
 #define BUFFSIZE 18432
 
 /* how many bytes of random input to read from files for PRNG */
@@ -62,7 +61,6 @@
 /* additional diagnostic messages */
 /* #define DEBUG_FD_ALLOC */
 
-#define DEBUG_INFO
 #ifdef DEBUG_INFO
 #define NOEXPORT
 #else
@@ -77,20 +75,33 @@
 
 #ifdef _WIN32_WCE
 #define USE_WIN32
-typedef int socklen_t;
+typedef int                 socklen_t;
 #endif
 
 #ifdef USE_WIN32
+typedef signed   char       int8_t;
+typedef signed   short      int16_t;
+typedef signed   int        int32_t;
+typedef signed   long long  int64_t;
+typedef unsigned char       uint8_t;
+typedef unsigned short      uint16_t;
+typedef unsigned int        uint32_t;
+typedef unsigned long long  uint64_t;
+#ifndef __MINGW32__
+#ifdef  _WIN64
+typedef __int64             ssize_t;
+#else
+typedef int                 ssize_t;
+#endif
+#endif
 #define USE_IPv6
 #define _CRT_SECURE_NO_DEPRECATE
 #define _CRT_NONSTDC_NO_DEPRECATE
+#define _CRT_NON_CONFORMING_SWPRINTFS
 #define HAVE_OSSL_ENGINE_H
 #define HAVE_OSSL_OCSP_H
-/* prevent including wincrypt.h, as it defines it's own OCSP_RESPONSE */
+/* prevent including wincrypt.h, as it defines its own OCSP_RESPONSE */
 #define __WINCRYPT_H__
-#endif
-
-#ifdef USE_WIN32
 #define S_EADDRINUSE  WSAEADDRINUSE
 /* winsock does not define WSAEAGAIN */
 /* in most (but not all!) BSD implementations EAGAIN==EWOULDBLOCK */
@@ -165,9 +176,17 @@ typedef int socklen_t;
 #include <pthread.h>
 #endif
 
-/* TCP wrapper */
-#if defined HAVE_TCPD_H && defined HAVE_LIBWRAP
-#define USE_LIBWRAP 1
+/* systemd */
+#ifdef USE_SYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
+
+#ifdef HAVE_STDINT_H
+#include <stdint.h>
+#endif
+
+#ifdef HAVE_INTTYPES_H
+#include <inttypes.h>
 #endif
 
 /* must be included before sys/stat.h for Ultrix */
@@ -191,10 +210,6 @@ typedef int socklen_t;
 /**************************************** WIN32 headers */
 
 #ifdef USE_WIN32
-
-typedef unsigned char u8;
-typedef unsigned short u16;
-typedef unsigned long u32;
 
 #define HAVE_STRUCT_ADDRINFO
 #define HAVE_SNPRINTF
@@ -222,6 +237,7 @@ typedef unsigned long u32;
 #include <windows.h>
 
 #include <process.h>     /* _beginthread */
+#include <shlobj.h>      /* SHGetFolderPath */
 #include <tchar.h>
 
 #include "resources.h"
@@ -229,22 +245,6 @@ typedef unsigned long u32;
 /**************************************** non-WIN32 headers */
 
 #else /* USE_WIN32 */
-
-#if SIZEOF_UNSIGNED_CHAR == 1
-typedef unsigned char u8;
-#endif
-
-#if SIZEOF_UNSIGNED_SHORT == 2
-typedef unsigned short u16;
-#else
-typedef unsigned int u16;
-#endif
-
-#if SIZEOF_UNSIGNED_INT == 4
-typedef unsigned int u32;
-#else
-typedef unsigned long u32;
-#endif
 
 #ifdef __INNOTEK_LIBC__
 #define socklen_t                   __socklen_t
@@ -403,7 +403,50 @@ extern char *sys_errlist[];
 #error OpenSSL library compiled without thread support
 #endif /* !OPENSSL_THREADS && USE_PTHREAD */
 
-#if defined (USE_WIN32) && defined(OPENSSL_FIPS)
+/* opensslv.h requires prior opensslconf.h to include -fips in version string */
+#include <openssl/opensslv.h>
+
+#if OPENSSL_VERSION_NUMBER<0x0090700fL
+#define OPENSSL_NO_MD4
+#endif /* OpenSSL older than 0.7.0 */
+
+#if OPENSSL_VERSION_NUMBER<0x0090800fL
+#define OPENSSL_NO_ECDH
+#define OPENSSL_NO_COMP
+#endif /* OpenSSL older than 0.8.0 */
+
+/* non-blocking OCSP API is not available before OpenSSL 0.9.8h */
+#if OPENSSL_VERSION_NUMBER<0x00908080L
+#ifndef OPENSSL_NO_OCSP
+#define OPENSSL_NO_OCSP
+#endif /* !defined(OPENSSL_NO_OCSP) */
+#endif /* OpenSSL older than 0.9.8h */
+
+#if OPENSSL_VERSION_NUMBER<0x10000000L
+#define OPENSSL_NO_TLSEXT
+#define OPENSSL_NO_PSK
+#endif /* OpenSSL older than 1.0.0 */
+
+#if OPENSSL_VERSION_NUMBER<0x10001000L || defined(OPENSSL_NO_TLS1)
+#define OPENSSL_NO_TLS1_1
+#define OPENSSL_NO_TLS1_2
+#endif /* OpenSSL older than 1.0.1 || defined(OPENSSL_NO_TLS1) */
+
+#if OPENSSL_VERSION_NUMBER>=0x10100000L
+#ifndef OPENSSL_NO_SSL2
+#define OPENSSL_NO_SSL2
+#endif /* !defined(OPENSSL_NO_SSL2) */
+#endif /* OpenSSL 1.1.0 or newer */
+
+#if !defined(HAVE_OSSL_ENGINE_H) && !defined(OPENSSL_NO_ENGINE)
+#define OPENSSL_NO_ENGINE
+#endif /* !defined(HAVE_OSSL_ENGINE_H) && !defined(OPENSSL_NO_ENGINE) */
+
+#if !defined(HAVE_OSSL_OCSP_H) && !defined(OPENSSL_NO_OCSP)
+#define OPENSSL_NO_OCSP
+#endif /* !defined(HAVE_OSSL_OCSP_H) && !defined(OPENSSL_NO_OCSP) */
+
+#if defined(USE_WIN32) && defined(OPENSSL_FIPS)
 #define USE_FIPS
 #endif
 
@@ -412,61 +455,30 @@ extern char *sys_errlist[];
 
 #include <openssl/lhash.h>
 #include <openssl/ssl.h>
+#include <openssl/ui.h>
 #include <openssl/err.h>
 #include <openssl/crypto.h> /* for CRYPTO_* and SSLeay_version */
 #include <openssl/rand.h>
+#include <openssl/bn.h>
 #ifndef OPENSSL_NO_MD4
 #include <openssl/md4.h>
-#endif
+#endif /* !defined(OPENSSL_NO_MD4) */
 #include <openssl/des.h>
-
-#ifdef HAVE_OSSL_ENGINE_H
+#ifndef OPENSSL_NO_DH
+#include <openssl/dh.h>
+#endif /* !defined(OPENSSL_NO_DH) */
 #ifndef OPENSSL_NO_ENGINE
 #include <openssl/engine.h>
-#else
-#undef HAVE_OSSL_ENGINE_H
-#endif
-#endif /* HAVE_OSSL_ENGINE_H */
-
-/* non-blocking OCSP API is not available before OpenSSL 0.9.8h */
-#if OPENSSL_VERSION_NUMBER<0x00908080L
-#ifdef HAVE_OSSL_OCSP_H
-#undef HAVE_OSSL_OCSP_H
-#endif /* HAVE_OSSL_OCSP_H */
-#endif /* OpenSSL older than 0.9.8h */
-
-#ifdef HAVE_OSSL_OCSP_H
+#endif /* !defined(OPENSSL_NO_ENGINE) */
+#ifndef OPENSSL_NO_OCSP
 #include <openssl/ocsp.h>
-#endif /* HAVE_OSSL_OCSP_H */
-
-#ifdef HAVE_OSSL_FIPS_H
-#include <openssl/fips.h>
-#include <openssl/fips_rand.h>
-#endif /* HAVE_OSSL_FIPS_H */
-
-#if OPENSSL_VERSION_NUMBER<0x0090800fL
-#define OPENSSL_NO_ECDH
-#endif /* OpenSSL version < 0.8.0 */
-
-#if OPENSSL_VERSION_NUMBER<0x10000000L
-#define OPENSSL_NO_TLSEXT
-#endif /* OpenSSL version < 1.0.0 */
-
+#endif /* !defined(OPENSSL_NO_OCSP) */
 #ifndef OPENSSL_NO_COMP
 /* not defined in public headers before OpenSSL 0.9.8 */
 STACK_OF(SSL_COMP) *SSL_COMP_get_compression_methods(void);
-#endif /* OPENSSL_NO_COMP */
+#endif /* !defined(OPENSSL_NO_COMP) */
 
 /**************************************** other defines */
-
-/* change all non-printable characters to '.' */
-#define safestring(s) \
-    do {unsigned char *p; for(p=(unsigned char *)(s); *p; p++) \
-        if(!isprint((int)*p)) *p='.';} while(0)
-/* change all unsafe characters to '.' */
-#define safename(s) \
-    do {unsigned char *p; for(p=(s); *p; p++) \
-        if(!isalnum((int)*p)) *p='.';} while(0)
 
 /* always use IPv4 defaults! */
 #define DEFAULT_LOOPBACK "127.0.0.1"
@@ -488,7 +500,7 @@ STACK_OF(SSL_COMP) *SSL_COMP_get_compression_methods(void);
 #endif /* defined (USE_WIN32) || defined (__vms) */
 
 #ifndef offsetof
-#define offsetof(T, F) ((unsigned int)((char *)&((T *)0L)->F - (char *)0L))
+#define offsetof(T, F) ((unsigned)((char *)&((T *)0L)->F - (char *)0L))
 #endif
 
 #endif /* defined COMMON_H */

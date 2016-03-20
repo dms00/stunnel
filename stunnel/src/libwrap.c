@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -42,23 +42,33 @@
 
 #include <tcpd.h>
 
+#if defined(USE_PTHREAD) && !defined(__CYGWIN__)
+/* http://wiki.osdev.org/Cygwin_Issues#Passing_file_descriptors */
+#define USE_LIBWRAP_POOL
+#endif /* USE_PTHREAD && !__CYGWIN__ */
+
 NOEXPORT int check(char *, int);
 
 int allow_severity=LOG_NOTICE, deny_severity=LOG_WARNING;
 
-#ifdef USE_PTHREAD
+#ifdef USE_LIBWRAP_POOL
 #define SERVNAME_LEN 256
 
 NOEXPORT ssize_t read_fd(int, void *, size_t, int *);
 NOEXPORT ssize_t write_fd(int, void *, size_t, int);
 
-int num_processes=0;
+unsigned num_processes=0;
 static int *ipc_socket, *busy;
-#endif /* USE_PTHREAD */
+#endif /* USE_LIBWRAP_POOL */
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
+#endif /* __GNUC__ */
 int libwrap_init() {
-#ifdef USE_PTHREAD
-    int i, j, rfd, result;
+#ifdef USE_LIBWRAP_POOL
+    unsigned i, j;
+    int rfd, result;
     char servname[SERVNAME_LEN];
     static int initialized=0;
     SERVICE_OPTIONS *opt;
@@ -82,6 +92,7 @@ int libwrap_init() {
             ioerror("fork");
             return 1;
         case  0:    /* child */
+            tls_alloc(NULL, ui_tls, "libwrap");
             drop_privileges(0); /* libwrap processes are not chrooted */
             close(0); /* stdin */
             close(1); /* stdout */
@@ -93,7 +104,7 @@ int libwrap_init() {
                 if(read_fd(ipc_socket[2*i+1], servname, SERVNAME_LEN, &rfd)<=0)
                     _exit(0);
                 result=check(servname, rfd);
-                write(ipc_socket[2*i+1], (u8 *)&result, sizeof result);
+                write(ipc_socket[2*i+1], (uint8_t *)&result, sizeof result);
                 if(rfd>=0)
                     close(rfd);
             }
@@ -102,18 +113,22 @@ int libwrap_init() {
         }
     }
     initialized=1;
-#endif /* USE_PTHREAD */
+#endif /* USE_LIBWRAP_POOL */
     return 0;
 }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif /* __GNUC__ */
 
 void libwrap_auth(CLI *c, char *accepted_address) {
     int result=0; /* deny by default */
-#ifdef USE_PTHREAD
-    static volatile int num_busy=0, roundrobin=0;
-    int retval, my_process;
+#ifdef USE_LIBWRAP_POOL
+    static volatile unsigned num_busy=0, roundrobin=0;
+    unsigned my_process;
+    int retval;
     static pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
     static pthread_cond_t cond=PTHREAD_COND_INITIALIZER;
-#endif /* USE_PTHREAD */
+#endif /* USE_LIBWRAP_POOL */
 
     if(!c->opt->option.libwrap) /* libwrap is disabled for this service */
         return; /* allow connection */
@@ -123,7 +138,7 @@ void libwrap_auth(CLI *c, char *accepted_address) {
         return;
     }
 #endif
-#ifdef USE_PTHREAD
+#ifdef USE_LIBWRAP_POOL
     if(num_processes) {
         s_log(LOG_DEBUG, "Waiting for a libwrap process");
 
@@ -157,7 +172,7 @@ void libwrap_auth(CLI *c, char *accepted_address) {
         write_fd(ipc_socket[2*my_process], c->opt->servname,
             strlen(c->opt->servname)+1, c->local_rfd.fd);
         s_read(c, ipc_socket[2*my_process],
-            (u8 *)&result, sizeof result);
+            (uint8_t *)&result, sizeof result);
         s_log(LOG_DEBUG, "Releasing libwrap process #%d", my_process);
 
         retval=pthread_mutex_lock(&mutex);
@@ -183,7 +198,7 @@ void libwrap_auth(CLI *c, char *accepted_address) {
 
         s_log(LOG_DEBUG, "Released libwrap process #%d", my_process);
     } else
-#endif /* USE_PTHREAD */
+#endif /* USE_LIBWRAP_POOL */
     { /* use original, synchronous libwrap calls */
         enter_critical_section(CRIT_LIBWRAP);
         result=check(c->opt->servname, c->local_rfd.fd);
@@ -207,7 +222,7 @@ NOEXPORT int check(char *name, int fd) {
     return hosts_access(&request);
 }
 
-#ifdef USE_PTHREAD
+#ifdef USE_LIBWRAP_POOL
 
 NOEXPORT ssize_t read_fd(int fd, void *ptr, size_t nbytes, int *recvfd) {
     struct msghdr msg;
@@ -299,7 +314,7 @@ NOEXPORT ssize_t write_fd(int fd, void *ptr, size_t nbytes, int sendfd) {
     return sendmsg(fd, &msg, 0);
 }
 
-#endif /* USE_PTHREAD */
+#endif /* USE_LIBWRAP_POOL */
 
 #endif /* USE_LIBWRAP */
 

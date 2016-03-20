@@ -1,3 +1,3 @@
-# stunnel v5.00
+# stunnel v5.14
 
-Download from ftp://ftp.stunnel.org/stunnel/archive/4.x/stunnel-5.00.tar.gz
+Download from ftp://ftp.stunnel.org/stunnel/archive/5.x/stunnel-5.14.tar.gz

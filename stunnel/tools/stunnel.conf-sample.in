@@ -1,4 +1,4 @@
-; Sample stunnel configuration file for Unix by Michal Trojnara 2002-2014
+﻿; Sample stunnel configuration file for Unix by Michal Trojnara 2002-2015
 ; Some options used here may be inadequate for your particular configuration
 ; This sample file does *not* represent stunnel.conf defaults
 ; Please consult the manual for detailed description of available options
@@ -9,15 +9,16 @@
 
 ; A copy of some devices and system files is needed within the chroot jail
 ; Chroot conflicts with configuration file reload and many other features
-chroot = @prefix@/var/lib/stunnel/
+; Remember also to update the logrotate configuration.
+;chroot = @prefix@/var/lib/stunnel/
 ; Chroot jail can be escaped if setuid option is not used
-setuid = nobody
-setgid = @DEFAULT_GROUP@
+;setuid = nobody
+;setgid = @DEFAULT_GROUP@
 
-; PID is created inside the chroot jail
-pid = /stunnel.pid
+; PID file is created inside the chroot jail (if enabled)
+;pid = @prefix@/var/run/stunnel.pid
 
-; Debugging stuff (may useful for troubleshooting)
+; Debugging stuff (may be useful for troubleshooting)
 ;debug = 7
 ;output = stunnel.log
 
@@ -43,8 +44,10 @@ cert = @prefix@/etc/stunnel/mail.pem
 ; Alternatively CRLfile can be used
 ;CRLfile = @prefix@/etc/stunnel/crls.pem
 
-; Disable support for insecure SSLv2 protocol
-options = NO_SSLv2
+; Enable support for the insecure SSLv2 protocol
+;options = -NO_SSLv2
+; Enable support for the insecure SSLv3 protocol
+;options = -NO_SSLv3
 ; Workaround for Eudora bug
 ;options = DONT_INSERT_EMPTY_FRAGMENTS
 

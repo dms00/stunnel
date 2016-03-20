@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -42,33 +42,36 @@
 
 DISK_FILE *file_open(char *name, FILE_MODE mode) {
     DISK_FILE *df;
-    LPTSTR tstr;
+    LPTSTR tname;
     HANDLE fh;
     DWORD desired_access, creation_disposition;
 
     /* open file */
     switch(mode) {
     case FILE_MODE_READ:
-        desired_access=FILE_READ_DATA;
+        desired_access=GENERIC_READ;
         creation_disposition=OPEN_EXISTING;
         break;
     case FILE_MODE_APPEND:
-        desired_access=FILE_APPEND_DATA;
-        creation_disposition=OPEN_ALWAYS;
+            /* reportedly more compatible than FILE_APPEND_DATA */
+        desired_access=GENERIC_WRITE;
+        creation_disposition=OPEN_ALWAYS; /* keep the data */
         break;
     case FILE_MODE_OVERWRITE:
-        desired_access=FILE_WRITE_DATA;
-        creation_disposition=CREATE_ALWAYS;
+        desired_access=GENERIC_WRITE;
+        creation_disposition=CREATE_ALWAYS; /* remove the data */
         break;
     default: /* invalid mode */
         return NULL;
     }
-    tstr=str2tstr(name);
-    fh=CreateFile(tstr, desired_access, FILE_SHARE_READ, NULL,
+    tname=str2tstr(name);
+    fh=CreateFile(tname, desired_access, FILE_SHARE_READ, NULL,
         creation_disposition, FILE_ATTRIBUTE_NORMAL, (HANDLE)NULL);
-    str_free(tstr); /* str_free() overwrites GetLastError() value */
+    str_free(tname); /* str_free() overwrites GetLastError() value */
     if(fh==INVALID_HANDLE_VALUE)
         return NULL;
+    if(mode==FILE_MODE_APPEND) /* workaround for FILE_APPEND_DATA */
+        SetFilePointer(fh, 0, NULL, FILE_END);
 
     /* setup df structure */
     df=str_alloc(sizeof df);
@@ -130,7 +133,8 @@ void file_close(DISK_FILE *df) {
 #ifdef USE_WIN32
     CloseHandle(df->fh);
 #else /* USE_WIN32 */
-    close(df->fd);
+    if(df->fd>2) /* never close stdin/stdout/stder */
+        close(df->fd);
 #endif /* USE_WIN32 */
     str_free(df);
 }
@@ -152,7 +156,7 @@ int file_getline(DISK_FILE *df, char *line, int len) {
 #ifdef USE_WIN32
         ReadFile(df->fh, line+i, 1, &num, NULL);
 #else /* USE_WIN32 */
-        num=read(df->fd, line+i, 1);
+        num=(int)read(df->fd, line+i, 1);
 #endif /* USE_WIN32 */
         if(num!=1) { /* EOF */
             if(i) /* any previously retrieved data */
@@ -178,8 +182,8 @@ int file_putline(DISK_FILE *df, char *line) {
     int num;
 #endif /* USE_WIN32 */
 
-    len=strlen(line);
-    buff=str_alloc(len+2); /* +2 for CR+LF */
+    len=(int)strlen(line);
+    buff=str_alloc((size_t)len+2); /* +2 for CR+LF */
     strcpy(buff, line);
 #ifdef USE_WIN32
     buff[len++]='\r'; /* CR */
@@ -189,50 +193,70 @@ int file_putline(DISK_FILE *df, char *line) {
     WriteFile(df->fh, buff, len, &num, NULL);
 #else /* USE_WIN32 */
     /* no file -> write to stderr */
-    num=write(df ? df->fd : 2, buff, len);
+    num=(int)write(df ? df->fd : 2, buff, (size_t)len);
 #endif /* USE_WIN32 */
     str_free(buff);
     return num;
 }
 
+int file_permissions(const char *file_name) {
+#if !defined(USE_WIN32) && !defined(USE_OS2)
+    struct stat st; /* buffer for stat */
+
+    /* check permissions of the private key file */
+    if(stat(file_name, &st)) {
+        ioerror(file_name);
+        return 1; /* FAILED */
+    }
+    if(st.st_mode & 7)
+        s_log(LOG_WARNING,
+            "Insecure file permissions on %s", file_name);
+#else
+    (void)file_name; /* skip warning about unused parameter */
+#endif
+    return 0;
+}
+
 #ifdef USE_WIN32
 
-LPTSTR str2tstr(const LPSTR in) {
+LPTSTR str2tstr(LPCSTR in) {
     LPTSTR out;
+#ifdef UNICODE
     int len;
 
-#ifdef UNICODE
-    len=MultiByteToWideChar(CP_ACP, 0, in, -1, NULL, 0);
+    len=MultiByteToWideChar(CP_UTF8, 0, in, -1, NULL, 0);
     if(!len)
-        return NULL;
+        return str_tprintf(TEXT("MultiByteToWideChar() failed"));
     out=str_alloc((len+1)*sizeof(WCHAR));
-    len=MultiByteToWideChar(CP_ACP, 0, in, -1, out, len);
-    if(!len)
-        return NULL;
+    len=MultiByteToWideChar(CP_UTF8, 0, in, -1, out, len);
+    if(!len) {
+        str_free(out);
+        return str_tprintf(TEXT("MultiByteToWideChar() failed"));
+    }
 #else
-    len=strlen(in);
-    out=str_alloc(len+1);
-    strcpy(out, in);
+    /* FIXME: convert UTF-8 to native codepage */
+    out=str_dup(in);
 #endif
     return out;
 }
 
-LPSTR tstr2str(const LPTSTR in) {
+LPSTR tstr2str(LPCTSTR in) {
     LPSTR out;
+#ifdef UNICODE
     int len;
 
-#ifdef UNICODE
-    len=WideCharToMultiByte(CP_ACP, 0, in, -1, NULL, 0, NULL, NULL);
+    len=WideCharToMultiByte(CP_UTF8, 0, in, -1, NULL, 0, NULL, NULL);
     if(!len)
-        return NULL;
+        return str_printf("WideCharToMultiByte() failed");
     out=str_alloc(len+1);
-    len=WideCharToMultiByte(CP_ACP, 0, in, -1, out, len, NULL, NULL);
-    if(!len)
-        return NULL;
+    len=WideCharToMultiByte(CP_UTF8, 0, in, -1, out, len, NULL, NULL);
+    if(!len) {
+        str_free(out);
+        return str_printf("WideCharToMultiByte() failed");
+    }
 #else
-    len=strlen(in);
-    out=str_alloc(len+1);
-    strcpy(out, in);
+    /* FIXME: convert native codepage to UTF-8 */
+    out=str_dup(in);
 #endif
     return out;
 }

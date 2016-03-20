@@ -1,9 +1,9 @@
-# NSIS stunnel installer by Michal Trojnara 1998-2014
+# NSIS stunnel installer by Michal Trojnara 1998-2015
 
 !include "Sections.nsh"
 
 !ifndef VERSION
-!define VERSION 5.00
+!define VERSION 5.14
 !endif
 
 !ifndef ZLIBDIR
@@ -11,7 +11,7 @@
 !endif
 
 !ifndef OPENSSLDIR
-!define OPENSSLDIR openssl-1.0.1f-win32
+!define OPENSSLDIR openssl-1.0.2a-win32
 !endif
 
 !addplugindir "plugins/SimpleFC"
@@ -40,10 +40,12 @@ Section "Stunnel Core Files (required)"
   SetOutPath "$INSTDIR"
 
   # stop the service, exit stunnel
+  Var /GLOBAL service
+  StrCpy $service 1
   ReadRegStr $R0 HKLM \
     "Software\Microsoft\Windows NT\CurrentVersion" CurrentVersion
   IfErrors skip_service_stop
-  ExecWait '"$INSTDIR\stunnel.exe" -stop -quiet'
+  ExecWait '"$INSTDIR\stunnel.exe" -stop -quiet' $service
 skip_service_stop:
   ExecWait '"$INSTDIR\stunnel.exe" -exit -quiet'
 
@@ -78,6 +80,7 @@ skip_service_stop:
   !cd ".."
   !cd "stunnel"
   !cd "tools"
+  # MINGW builds requires libssp-0.dll instead of msvcr90.dll
 
   # add firewall rule
   SimpleFC::AddApplication "stunnel (GUI Version)" \
@@ -100,6 +103,12 @@ skip_service_stop:
   WriteRegDWORD HKLM \
     "Software\Microsoft\Windows\CurrentVersion\Uninstall\stunnel" \
     "NoRepair" 1
+
+  # start the service
+  IntCmp $service 0 lbl_start_service lbl_skip_service lbl_skip_service
+lbl_start_service:
+  ExecWait '"$INSTDIR\stunnel.exe" -start -quiet'
+lbl_skip_service:
 SectionEnd
 
 Section "Self-signed Certificate Tools" sectionCA
