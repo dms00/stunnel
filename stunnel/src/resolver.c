@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -40,8 +40,7 @@
 
 /**************************************** prototypes */
 
-NOEXPORT int name2addrlist(SOCKADDR_LIST *, char *, char *);
-NOEXPORT int hostport2addrlist(SOCKADDR_LIST *, char *, char *);
+NOEXPORT void addrlist2addr(SOCKADDR_UNION *, SOCKADDR_LIST *);
 
 #ifndef HAVE_GETADDRINFO
 
@@ -92,7 +91,8 @@ void resolver_init() {
 #if defined(USE_WIN32) && !defined(_WIN32_WCE)
     HINSTANCE handle;
 
-    handle=LoadLibrary("ws2_32.dll"); /* IPv6 in Windows XP or higher */
+        /* IPv6 in Windows XP or higher */
+    handle=LoadLibrary(TEXT("ws2_32.dll"));
     if(handle) {
         s_getaddrinfo=(GETADDRINFO)GetProcAddress(handle, "getaddrinfo");
         s_freeaddrinfo=(FREEADDRINFO)GetProcAddress(handle, "freeaddrinfo");
@@ -101,7 +101,9 @@ void resolver_init() {
             return; /* IPv6 detected -> OK */
         FreeLibrary(handle);
     }
-    handle=LoadLibrary("wship6.dll"); /* experimental IPv6 for Windows 2000 */
+
+        /* experimental IPv6 for Windows 2000 */
+    handle=LoadLibrary(TEXT("wship6.dll"));
     if(handle) {
         s_getaddrinfo=(GETADDRINFO)GetProcAddress(handle, "getaddrinfo");
         s_freeaddrinfo=(FREEADDRINFO)GetProcAddress(handle, "freeaddrinfo");
@@ -110,6 +112,8 @@ void resolver_init() {
             return; /* IPv6 detected -> OK */
         FreeLibrary(handle);
     }
+
+        /* fall back to the built-in emulation */
     s_getaddrinfo=NULL;
     s_freeaddrinfo=NULL;
     s_getnameinfo=NULL;
@@ -118,47 +122,63 @@ void resolver_init() {
 
 /**************************************** stunnel resolver API */
 
-int name2addr(SOCKADDR_UNION *addr, char *name, char *default_host) {
-    SOCKADDR_LIST addr_list;
-    int retval;
+unsigned name2addr(SOCKADDR_UNION *addr, char *name,
+        char *default_host) {
+    SOCKADDR_LIST *addr_list;
+    unsigned retval;
 
-    addr_list.num=0;
-    addr_list.addr=NULL;
-    retval=name2addrlist(&addr_list, name, default_host);
-    if(retval>0)
-        memcpy(addr, &addr_list.addr[0], sizeof *addr);
-    if(addr_list.addr)
-        str_free(addr_list.addr);
+    addr_list=str_alloc(sizeof(SOCKADDR_LIST));
+    addrlist_init(addr_list, 1);
+    retval=name2addrlist(addr_list, name, default_host);
+    if(retval)
+        addrlist2addr(addr, addr_list);
+    if(addr_list->addr)
+        str_free(addr_list->addr);
+    str_free(addr_list);
     return retval;
 }
 
-int hostport2addr(SOCKADDR_UNION *addr, char *hostname, char *portname) {
-    SOCKADDR_LIST addr_list;
-    int retval;
+unsigned hostport2addr(SOCKADDR_UNION *addr,
+        char *host_name, char *port_name) {
+    SOCKADDR_LIST *addr_list;
+    unsigned retval;
 
-    addr_list.num=0;
-    addr_list.addr=NULL;
-    retval=hostport2addrlist(&addr_list, hostname, portname);
-    if(retval>0)
-        memcpy(addr, &addr_list.addr[0], sizeof *addr);
-    if(addr_list.addr)
-        str_free(addr_list.addr);
+    addr_list=str_alloc(sizeof(SOCKADDR_LIST));
+    addrlist_init(addr_list, 1);
+    retval=hostport2addrlist(addr_list, host_name, port_name);
+    if(retval)
+        addrlist2addr(addr, addr_list);
+    if(addr_list->addr)
+        str_free(addr_list->addr);
+    str_free(addr_list);
     return retval;
 }
 
-int namelist2addrlist(SOCKADDR_LIST *addr_list, NAME_LIST *name_list, char *default_host) {
-    /* recursive implementation to reverse the list */
-    if(!name_list)
-        return 0;
-    return namelist2addrlist(addr_list, name_list->next, default_host) +
-        name2addrlist(addr_list, name_list->name, default_host);
+NOEXPORT void addrlist2addr(SOCKADDR_UNION *addr, SOCKADDR_LIST *addr_list) {
+    unsigned i;
+
+    for(i=0; i<addr_list->num; ++i) { /* find the first IPv4 address */
+        if(addr_list->addr[i].in.sin_family==AF_INET) {
+            memcpy(addr, &addr_list->addr[i], sizeof(SOCKADDR_UNION));
+            return;
+        }
+    }
+#ifdef USE_IPv6
+    for(i=0; i<addr_list->num; ++i) { /* find the first IPv6 address */
+        if(addr_list->addr[i].in.sin_family==AF_INET6) {
+            memcpy(addr, &addr_list->addr[i], sizeof(SOCKADDR_UNION));
+            return;
+        }
+    }
+#endif
+    /* copy the first address resolved (curently AF_UNIX) */
+    memcpy(addr, &addr_list->addr[0], sizeof(SOCKADDR_UNION));
 }
 
-NOEXPORT int name2addrlist(SOCKADDR_LIST *addr_list, char *name, char *default_host) {
-    char *tmp, *hostname, *portname;
-    int retval;
-
-    addr_list->cur=0; /* reset round-robin counter */
+unsigned name2addrlist(SOCKADDR_LIST *addr_list,
+        char *name, char *default_host) {
+    char *tmp, *host_name, *port_name;
+    unsigned retval;
 
     /* first check if this is a UNIX socket */
 #ifdef HAVE_STRUCT_SOCKADDR_UN
@@ -176,25 +196,25 @@ NOEXPORT int name2addrlist(SOCKADDR_LIST *addr_list, char *name, char *default_h
     }
 #endif
 
-    /* set hostname and portname */
+    /* setup host_name and port_name */
     tmp=str_dup(name);
-    portname=strrchr(tmp, ':');
-    if(portname) {
-        hostname=tmp;
-        *portname++='\0';
+    port_name=strrchr(tmp, ':');
+    if(port_name) {
+        host_name=tmp;
+        *port_name++='\0';
     } else { /* no ':' - use default host IP */
-        hostname=default_host;
-        portname=tmp;
+        host_name=default_host;
+        port_name=tmp;
     }
 
     /* fill addr_list structure */
-    retval=hostport2addrlist(addr_list, hostname, portname);
+    retval=hostport2addrlist(addr_list, host_name, port_name);
     str_free(tmp);
     return retval;
 }
 
-NOEXPORT int hostport2addrlist(SOCKADDR_LIST *addr_list,
-        char *hostname, char *portname) {
+unsigned hostport2addrlist(SOCKADDR_LIST *addr_list,
+        char *host_name, char *port_name) {
     struct addrinfo hints, *res=NULL, *cur;
     int err, retries=0;
 
@@ -207,7 +227,7 @@ NOEXPORT int hostport2addrlist(SOCKADDR_LIST *addr_list,
     hints.ai_socktype=SOCK_STREAM;
     hints.ai_protocol=IPPROTO_TCP;
     for(;;) {
-        err=getaddrinfo(hostname, portname, &hints, &res);
+        err=getaddrinfo(host_name, port_name, &hints, &res);
         if(err && res)
             freeaddrinfo(res);
         if(err!=EAI_AGAIN || ++retries>=3)
@@ -219,11 +239,11 @@ NOEXPORT int hostport2addrlist(SOCKADDR_LIST *addr_list,
     case 0:
         break; /* success */
     case EAI_SERVICE:
-        s_log(LOG_ERR, "Unknown TCP service '%s'", portname);
+        s_log(LOG_ERR, "Unknown TCP service \"%s\"", port_name);
         return 0; /* error */
     default:
-        s_log(LOG_ERR, "Error resolving '%s': %s",
-            hostname, s_gai_strerror(err));
+        s_log(LOG_ERR, "Error resolving \"%s\": %s",
+            host_name, s_gai_strerror(err));
         return 0; /* error */
     }
 
@@ -243,12 +263,38 @@ NOEXPORT int hostport2addrlist(SOCKADDR_LIST *addr_list,
     return addr_list->num; /* ok - return the number of addresses */
 }
 
-void addrlist_dup(SOCKADDR_LIST *dst, const SOCKADDR_LIST *src) {
+void addrlist_init(SOCKADDR_LIST *addr_list, int clear_names) {
+    addr_list->num=0;
+    if(addr_list->addr)
+        str_free(addr_list->addr);
+    addr_list->addr=NULL;
+    addr_list->rr_val=0; /* reset round-robin counter */
+    /* allow structures created with sockaddr_dup() to modify
+     * the original rr_val rather than its local copy */
+    addr_list->rr_ptr=&addr_list->rr_val;
+    if(clear_names)
+        addr_list->names=NULL;
+}
+
+unsigned addrlist_dup(SOCKADDR_LIST *dst, const SOCKADDR_LIST *src) {
     memcpy(dst, src, sizeof(SOCKADDR_LIST));
-    if(src->addr) {
+    if(src->num) { /* already resolved */
         dst->addr=str_alloc(src->num*sizeof(SOCKADDR_UNION));
         memcpy(dst->addr, src->addr, src->num*sizeof(SOCKADDR_UNION));
+    } else { /* delayed resolver */
+        addrlist_resolve(dst);
     }
+    return dst->num;
+}
+
+unsigned addrlist_resolve(SOCKADDR_LIST *addr_list) {
+    unsigned num=0;
+    NAME_LIST *host;
+
+    addrlist_init(addr_list, 0);
+    for(host=addr_list->names; host; host=host->next)
+        num+=name2addrlist(addr_list, host->name, DEFAULT_LOOPBACK);
+    return num;
 }
 
 char *s_ntop(SOCKADDR_UNION *addr, socklen_t addrlen) {

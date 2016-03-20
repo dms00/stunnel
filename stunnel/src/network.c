@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -72,7 +72,7 @@ void s_poll_init(s_poll_set *fds) {
 }
 
 void s_poll_add(s_poll_set *fds, int fd, int rd, int wr) {
-    unsigned int i;
+    unsigned i;
 
     for(i=0; i<fds->nfds && fds->ufds[i].fd!=fd; i++)
         ;
@@ -85,14 +85,18 @@ void s_poll_add(s_poll_set *fds, int fd, int rd, int wr) {
         fds->ufds[i].events=0;
         fds->nfds++;
     }
-    if(rd)
+    if(rd) {
         fds->ufds[i].events|=POLLIN;
+#ifdef POLLRDHUP
+        fds->ufds[i].events|=POLLRDHUP;
+#endif
+    }
     if(wr)
         fds->ufds[i].events|=POLLOUT;
 }
 
 int s_poll_canread(s_poll_set *fds, int fd) {
-    unsigned int i;
+    unsigned i;
 
     for(i=0; i<fds->nfds; i++)
         if(fds->ufds[i].fd==fd)
@@ -101,7 +105,7 @@ int s_poll_canread(s_poll_set *fds, int fd) {
 }
 
 int s_poll_canwrite(s_poll_set *fds, int fd) {
-    unsigned int i;
+    unsigned i;
 
     for(i=0; i<fds->nfds; i++)
         if(fds->ufds[i].fd==fd)
@@ -109,22 +113,27 @@ int s_poll_canwrite(s_poll_set *fds, int fd) {
     return 0; /* not listed in fds */
 }
 
+/* best doc: http://lxr.free-electrons.com/source/net/ipv4/tcp.c#L456 */
+
 int s_poll_hup(s_poll_set *fds, int fd) {
-    unsigned int i;
+    unsigned i;
 
     for(i=0; i<fds->nfds; i++)
         if(fds->ufds[i].fd==fd)
-            return fds->ufds[i].revents&POLLHUP;
+            return fds->ufds[i].revents&POLLHUP; /* read and write closed */
     return 0; /* not listed in fds */
 }
 
-int s_poll_error(s_poll_set *fds, int fd) {
-    unsigned int i;
+int s_poll_rdhup(s_poll_set *fds, int fd) {
+    unsigned i;
 
     for(i=0; i<fds->nfds; i++)
         if(fds->ufds[i].fd==fd)
-            return fds->ufds[i].revents&(POLLERR|POLLNVAL) ?
-                get_socket_error(fd) : 0;
+#ifdef POLLRDHUP
+            return fds->ufds[i].revents&POLLRDHUP; /* read closed */
+#else
+            return fds->ufds[i].revents&POLLHUP; /* read and write closed */
+#endif
     return 0; /* not listed in fds */
 }
 
@@ -139,9 +148,9 @@ NOEXPORT void scan_waiting_queue(void) {
     int retval;
     CONTEXT *context, *prev;
     int min_timeout;
-    unsigned int nfds, i;
+    unsigned nfds, i;
     time_t now;
-    static unsigned int max_nfds=0;
+    static unsigned max_nfds=0;
     static struct pollfd *ufds=NULL;
 
     time(&now);
@@ -234,9 +243,9 @@ int s_poll_wait(s_poll_set *fds, int sec, int msec) {
     ready_head=ready_head->next;
     if(!ready_head) /* the queue is empty */
         ready_tail=NULL;
-    /* it it safe to s_log() after new ready_head is set */
+    /* it is safe to s_log() after new ready_head is set */
 
-    /* it's illegal to deallocate the stack of the current context */
+    /* it is illegal to deallocate the stack of the current context */
     if(to_free) { /* a delayed deallocation is scheduled */
 #ifdef DEBUG_UCONTEXT
         s_log(LOG_DEBUG, "Releasing context %ld", to_free->id);
@@ -318,11 +327,11 @@ void s_poll_free(s_poll_set *fds) {
         if(fds->ixfds)
             str_free(fds->ixfds);
         if(fds->orfds)
-            str_free(fds->irfds);
+            str_free(fds->orfds);
         if(fds->owfds)
-            str_free(fds->iwfds);
+            str_free(fds->owfds);
         if(fds->oxfds)
-            str_free(fds->ixfds);
+            str_free(fds->oxfds);
         str_free(fds);
     }
 }
@@ -347,11 +356,11 @@ void s_poll_add(s_poll_set *fds, int fd, int rd, int wr) {
     }
 #endif
     if(rd)
-        FD_SET((unsigned int)fd, fds->irfds);
+        FD_SET((unsigned)fd, fds->irfds);
     if(wr)
-        FD_SET((unsigned int)fd, fds->iwfds);
+        FD_SET((unsigned)fd, fds->iwfds);
     /* always expect errors (and the Spanish Inquisition) */
-    FD_SET((unsigned int)fd, fds->ixfds);
+    FD_SET((unsigned)fd, fds->ixfds);
     if(fd>fds->max)
         fds->max=fd;
 }
@@ -370,12 +379,10 @@ int s_poll_hup(s_poll_set *fds, int fd) {
     return 0; /* FIXME: how to detect HUP condition with select()? */
 }
 
-int s_poll_error(s_poll_set *fds, int fd) {
-    /* error conditions are signaled as read, but apparently *not* in Winsock:
-     * http://msdn.microsoft.com/en-us/library/windows/desktop/ms737625%28v=vs.85%29.aspx */
-    if(!FD_ISSET(fd, fds->orfds) && !FD_ISSET(fd, fds->oxfds))
-        return 0;
-    return get_socket_error(fd); /* check if it's really an error */
+int s_poll_rdhup(s_poll_set *fds, int fd) {
+    (void)fds; /* skip warning about unused parameter */
+    (void)fd; /* skip warning about unused parameter */
+    return 0; /* FIXME: how to detect RDHUP condition with select()? */
 }
 
 #ifdef USE_WIN32
@@ -421,7 +428,7 @@ int set_socket_options(int s, int type) {
     SOCK_OPT *ptr;
     extern SOCK_OPT sock_opts[];
     static char *type_str[3]={"accept", "local", "remote"};
-    int opt_size;
+    socklen_t opt_size;
     int retval=0; /* no error found */
 
     for(ptr=sock_opts; ptr->opt_str; ptr++) {
@@ -435,7 +442,7 @@ int set_socket_options(int s, int type) {
             opt_size=sizeof(struct timeval);
             break;
         case TYPE_STRING:
-            opt_size=strlen(ptr->opt_val[type]->c_val)+1;
+            opt_size=(socklen_t)strlen(ptr->opt_val[type]->c_val)+1;
             break;
         default:
             opt_size=sizeof(int);
@@ -530,9 +537,10 @@ int s_connect(CLI *c, SOCKADDR_UNION *addr, socklen_t addrlen) {
     return -1; /* should not be possible */
 }
 
-void s_write(CLI *c, int fd, void *ptr, int len) {
+void s_write(CLI *c, int fd, const void *buf, size_t len) {
         /* simulate a blocking write */
-    int num;
+    uint8_t *ptr=(uint8_t *)buf;
+    ssize_t num;
 
     while(len>0) {
         s_poll_init(c->fds);
@@ -551,20 +559,19 @@ void s_write(CLI *c, int fd, void *ptr, int len) {
             s_log(LOG_ERR, "s_write: s_poll_wait: unknown result");
             longjmp(c->err, 1); /* error */
         }
-        num=writesocket(fd, ptr, len);
-        switch(num) {
-        case -1: /* error */
+        num=writesocket(fd, (void *)ptr, len);
+        if(num==-1) { /* error */
             sockerror("writesocket (s_write)");
             longjmp(c->err, 1);
         }
-        ptr=(u8 *)ptr+num;
-        len-=num;
+        ptr+=(size_t)num;
+        len-=(size_t)num;
     }
 }
 
-void s_read(CLI *c, int fd, void *ptr, int len) {
+void s_read(CLI *c, int fd, void *ptr, size_t len) {
         /* simulate a blocking read */
-    int num;
+    ssize_t num;
 
     while(len>0) {
         s_poll_init(c->fds);
@@ -592,81 +599,50 @@ void s_read(CLI *c, int fd, void *ptr, int len) {
             s_log(LOG_ERR, "Unexpected socket close (s_read)");
             longjmp(c->err, 1);
         }
-        ptr=(u8 *)ptr+num;
-        len-=num;
+        ptr=(uint8_t *)ptr+num;
+        len-=(size_t)num;
     }
 }
 
 void fd_putline(CLI *c, int fd, const char *line) {
     char *tmpline;
     const char crlf[]="\r\n";
-    int len;
+    size_t len;
 
     tmpline=str_printf("%s%s", line, crlf);
     len=strlen(tmpline);
     s_write(c, fd, tmpline, len);
     tmpline[len-2]='\0'; /* remove CRLF */
-    safestring(tmpline);
     s_log(LOG_DEBUG, " -> %s", tmpline);
     str_free(tmpline);
 }
 
 char *fd_getline(CLI *c, int fd) {
-    char *line, *tmpline;
-    int ptr=0, allocated=32;
+    char *line;
+    size_t ptr=0, allocated=32;
 
     line=str_alloc(allocated);
     for(;;) {
-        s_poll_init(c->fds);
-        s_poll_add(c->fds, fd, 1, 0); /* read */
-        switch(s_poll_wait(c->fds, c->opt->timeout_busy, 0)) {
-        case -1:
-            sockerror("fd_getline: s_poll_wait");
+        if(ptr>65536) { /* >64KB --> DoS protection */
+            s_log(LOG_ERR, "fd_getline: Line too long");
             str_free(line);
-            longjmp(c->err, 1); /* error */
-        case 0:
-            s_log(LOG_INFO, "fd_getline: s_poll_wait:"
-                " TIMEOUTbusy exceeded: sending reset");
-            str_free(line);
-            longjmp(c->err, 1); /* timeout */
-        case 1:
-            break; /* OK */
-        default:
-            s_log(LOG_ERR, "fd_getline: s_poll_wait: Unknown result");
-            str_free(line);
-            longjmp(c->err, 1); /* error */
+            longjmp(c->err, 1);
         }
         if(allocated<ptr+1) {
             allocated*=2;
             line=str_realloc(line, allocated);
         }
-        switch(readsocket(fd, line+ptr, 1)) {
-        case -1: /* error */
-            sockerror("fd_getline: readsocket");
-            str_free(line);
-            longjmp(c->err, 1);
-        case 0: /* EOF */
-            s_log(LOG_ERR, "fd_getline: Unexpected socket close");
-            str_free(line);
-            longjmp(c->err, 1);
-        }
+        s_read(c, fd, line+ptr, 1);
         if(line[ptr]=='\r')
             continue;
         if(line[ptr]=='\n')
             break;
         if(line[ptr]=='\0')
             break;
-        if(++ptr>65536) { /* >64KB --> DoS protection */
-            s_log(LOG_ERR, "fd_getline: Line too long");
-            str_free(line);
-            longjmp(c->err, 1);
-        }
+        ++ptr;
     }
     line[ptr]='\0';
-    tmpline=str_dup(line);
-    safestring(tmpline);
-    s_log(LOG_DEBUG, " <- %s", tmpline);
-    str_free(tmpline);
+    s_log(LOG_DEBUG, " <- %s", line);
     return line;
 }
 
@@ -683,6 +659,98 @@ void fd_printf(CLI *c, int fd, const char *format, ...) {
     }
     fd_putline(c, fd, line);
     str_free(line);
+}
+
+void s_ssl_write(CLI *c, const void *buf, int len) {
+        /* simulate a blocking SSL_write */
+    uint8_t *ptr=(uint8_t *)buf;
+    int num;
+
+    while(len>0) {
+        s_poll_init(c->fds);
+        s_poll_add(c->fds, c->ssl_wfd->fd, 0, 1); /* write */
+        switch(s_poll_wait(c->fds, c->opt->timeout_busy, 0)) {
+        case -1:
+            sockerror("s_write: s_poll_wait");
+            longjmp(c->err, 1); /* error */
+        case 0:
+            s_log(LOG_INFO, "s_write: s_poll_wait:"
+                " TIMEOUTbusy exceeded: sending reset");
+            longjmp(c->err, 1); /* timeout */
+        case 1:
+            break; /* OK */
+        default:
+            s_log(LOG_ERR, "s_write: s_poll_wait: unknown result");
+            longjmp(c->err, 1); /* error */
+        }
+        num=SSL_write(c->ssl, (void *)ptr, len);
+        if(num==-1) { /* error */
+            sockerror("SSL_write (s_ssl_write)");
+            longjmp(c->err, 1);
+        }
+        ptr+=num;
+        len-=num;
+    }
+}
+
+void s_ssl_read(CLI *c, void *ptr, int len) {
+        /* simulate a blocking SSL_read */
+    int num;
+
+    while(len>0) {
+        if(!SSL_pending(c->ssl)) {
+            s_poll_init(c->fds);
+            s_poll_add(c->fds, c->ssl_rfd->fd, 1, 0); /* read */
+            switch(s_poll_wait(c->fds, c->opt->timeout_busy, 0)) {
+            case -1:
+                sockerror("s_read: s_poll_wait");
+                longjmp(c->err, 1); /* error */
+            case 0:
+                s_log(LOG_INFO, "s_read: s_poll_wait:"
+                    " TIMEOUTbusy exceeded: sending reset");
+                longjmp(c->err, 1); /* timeout */
+            case 1:
+                break; /* OK */
+            default:
+                s_log(LOG_ERR, "s_read: s_poll_wait: unknown result");
+                longjmp(c->err, 1); /* error */
+            }
+        }
+        num=SSL_read(c->ssl, ptr, len);
+        switch(num) {
+        case -1: /* error */
+            sockerror("SSL_read (s_ssl_read)");
+            longjmp(c->err, 1);
+        case 0: /* EOF */
+            s_log(LOG_ERR, "Unexpected socket close (s_ssl_read)");
+            longjmp(c->err, 1);
+        }
+        ptr=(uint8_t *)ptr+num;
+        len-=num;
+    }
+}
+
+char *ssl_getstring(CLI *c) { /* get null-terminated string */
+    char *line;
+    size_t ptr=0, allocated=32;
+
+    line=str_alloc(allocated);
+    for(;;) {
+        if(ptr>65536) { /* >64KB --> DoS protection */
+            s_log(LOG_ERR, "fd_getline: Line too long");
+            str_free(line);
+            longjmp(c->err, 1);
+        }
+        if(allocated<ptr+1) {
+            allocated*=2;
+            line=str_realloc(line, allocated);
+        }
+        s_ssl_read(c, line+ptr, 1);
+        if(line[ptr]=='\0')
+            break;
+        ++ptr;
+    }
+    return line;
 }
 
 #define INET_SOCKET_PAIR

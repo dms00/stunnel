@@ -11,12 +11,12 @@ stunnel - uniwersalny tunel protokołu SSL
 
 =item B<Unix:>
 
-B<stunnel> [S<PLIK>] | S<-fd N> | S<-help> | S<-version> | S<-sockets>
+B<stunnel> [S<PLIK>] | S<-fd N> | S<-help> | S<-version> | S<-sockets> | S<-options>
 
 =item B<WIN32:>
 
 B<stunnel> [ [S<-install> | S<-uninstall> | S<-start> | S<-stop> ] | S<-exit>]
-    [S<-quiet>] [S<PLIK>] ] | S<-help> | S<-version> | S<-sockets>
+    [S<-quiet>] [S<PLIK>] ] | S<-help> | S<-version> | S<-sockets> | S<-options>
 
 =back
 
@@ -60,19 +60,23 @@ drukuj wersję programu i domyślne wartości parametrów
 
 drukuj domyślne opcje gniazd
 
-=item B<-install> (tylko NT/2000/XP)
+=item B<-options>
+
+drukuj wspierane opcje SSL
+
+=item B<-install> (tylko Windows NT lub nowszy)
 
 instaluj serwis NT
 
-=item B<-uninstall> (tylko NT/2000/XP)
+=item B<-uninstall> (tylko Windows NT lub nowszy)
 
 odinstaluj serwis NT
 
-=item B<-start> (tylko NT/2000/XP)
+=item B<-start> (tylko Windows NT lub nowszy)
 
 uruchom serwis NT
 
-=item B<-stop> (tylko NT/2000/XP)
+=item B<-stop> (tylko Windows NT lub nowszy)
 
 zatrzymaj serwis NT
 
@@ -80,10 +84,9 @@ zatrzymaj serwis NT
 
 zatrzymaj uruchomiony program
 
-=item B<-quiet> (tylko NT/2000/XP)
+=item B<-quiet> (tylko Win32)
 
-nie wyświetlaj okienka informującego o pomyślnym zainstalowaniu lub
-odinstalowaniu
+nie wyświetlaj okienek z komunikatami
 
 =back
 
@@ -175,7 +178,7 @@ kompatybilna implementacją B<OpenSSL 0.9.7>.
 
 Kompresja rle nie jest zaimplementowana w aktualnych wersjach B<OpenSSL>.
 
-=item B<debug> = POZIOM[.PODSYSTEM]
+=item B<debug> = [PODSYSTEM].POZIOM
 
 szczegółowość logowania
 
@@ -325,7 +328,12 @@ domyślnie: yes (nadpisz)
 
 =item B<service> = SERWIS (tylko Unix)
 
-użyj parametru jako nazwy serwisu dla biblioteki TCP Wrapper w trybie I<inetd>
+nazwa usługi
+
+Podana nazwa usługi będzie używana jako nazwa usługi dla inicjalizacji sysloga,
+oraz dla biblioteki TCP Wrapper w trybie I<inetd>.  Chociaż technicznie można
+użyć tej opcji w trybie w sekcji usług, to jest ona użyteczna jedynie w opcjach
+globalnych.
 
 domyślnie: stunnel
 
@@ -486,6 +494,50 @@ Listę dostępnych krzywych można uzyskać poleceniem:
 
 domyślnie: prime256v1
 
+=item B<logId> = TYP
+
+typ identyfikatora połączenia klienta
+
+Identyfikator ten pozwala rozróżnić wpisy w logu wygenerowane dla
+poszczególnych połączeń.
+
+Aktualnie wspierane typy:
+
+=over 4
+
+=item I<sequential>
+
+Kolejny numer połączenia jest unikalny jedynie w obrębie pojedynczej instancji
+programu B<stunnel>, ale bardzo krótki.  Jest on szczególnie użytczny przy
+ręcznej analizie logów.
+
+=item I<unique>
+
+Ten rodzaj identyfikatora jest globalnie unikalny, ale znacznie dłuższy, niż
+kolejny numer połączenia.  Jest on szczególnie użyteczny przy zautomatyzowanej
+analizie logów.
+
+=item I<thread>
+
+Identyfikator wątku systemu operacyjnego nie jest ani unikalny (nawet w obrębie
+pojedynczej instancji programu B<stunnel>), ani krótki.  Jest on szczególnie
+użyteczny przy diagnozowaniu problemów z oprogramowaniem lub konfiguracją.
+
+=back
+
+domyślnie: sequential
+
+=item B<debug> = POZIOM
+
+szczegółowość logowania
+
+Poziom logowania można określić przy pomocy jednej z nazw lub liczb:
+emerg (0), alert (1), crit (2), err (3), warning (4), notice (5),
+info (6) lub debug (7).
+Zapisywane są komunikaty o poziomie niższym (numerycznie) lub równym podanemu.
+Do uzyskania najwyższego poziomu szczegółowości można użyć opcji
+I<debug = debug> lub I<debug = 7>.  Domyślnym poziomem jest notice (5).
+
 =item B<delay> = yes | no
 
 opóźnij rozwinięcie adresu DNS podanego w opcji I<connect>
@@ -517,6 +569,9 @@ wykonaj lokalny program przystosowany do pracy z superdemonem inetd
 
 Jeżeli zdefiniowano katalog I<chroot>, to ścieżka do I<exec> jest określona
 względem tego katalogu.
+
+Na platformach Unix ustawiane są następujące zmienne środowiskowe:
+REMOTE_HOST, REMOTE_PORT, SSL_CLIENT_DN, SSL_CLIENT_I_DN.
 
 =item B<execargs> = $0 $1 $2 ...
 
@@ -600,6 +655,13 @@ Opcja I<sni> jest dostępna począwszy od B<OpenSSL 1.0.0>.
 
 serwer OCSP do weryfikacji certyfikatów
 
+=item B<OCSPaia> = yes | no
+
+weryfikuj certyfikaty przy użyciu respondertów AIA
+
+Opcja I<OCSPaia> pozwala na weryfikowanie certyfikatów przy pomocy listy URLi
+serwerów OCSP przesłanych w rozszerzeniach AIA (Authority Information Access).
+
 =item B<OCSPflag> = FLAGA_OCSP
 
 flaga serwera OCSP
@@ -615,12 +677,21 @@ opcje biblioteki B<OpenSSL>
 
 Parametrem jest nazwa opcji zgodnie z opisem w I<SSL_CTX_set_options(3ssl)>,
 ale bez przedrostka I<SSL_OP_>.
-Aby wyspecyfikować kilka opcji należy użyć I<options> wielokrotnie.
+I<stunnel -options> wyświetla opcje dozwolone w aktualnej kombinacji
+programu I<stunnel> i biblioteki I<OpenSSL>.
 
-Na przykład dla zachowania kompatybilności z błędami implementacji SSL
-w programie Eudora można użyć opcji:
+Aby wyspecyfikować kilka opcji należy użyć I<options> wielokrotnie.
+Nazwa opcji może być poprzedzona myślnikiem ("-") celem wyłączenia opcji.
+
+Na przykład, dla zachowania kompatybilności z błędami implementacji SSL
+w programie Eudora, można użyć opcji:
 
     options = DONT_INSERT_EMPTY_FRAGMENTS
+
+domyślnie:
+
+    options = NO_SSLv2
+    options = NO_SSLv3
 
 =item B<protocol> = PROTOKÓŁ
 
@@ -671,6 +742,22 @@ Przekazywanie adresu IP haproxy http://haproxy.1wt.eu/download/1.5/doc/proxy-pro
 
 Negocjacja RFC 2487 - I<SMTP Service Extension for Secure SMTP over TLS>
 
+=item I<socks>
+
+Wspierany jest protokół SOCKS w wersjach 4, 4a i 5.
+Protokół SOCKS enkapsulowany jest w protokole SSL/TLS, więc adres serwera
+docelowego nie jest widoczny dla napastnika przechwytującego ruch sieciowy.
+
+F<http://www.openssh.com/txt/socks4.protocol>
+
+F<http://www.openssh.com/txt/socks4a.protocol>
+
+Nie jest wspierana komenda BIND protokołu SOCKS.
+Przesłana wartość parametru USERID jest ignorowana.
+
+Sekcja PRZYKŁADY zawiera przykładowe pliki konfiguracyjne VPNa zbudowanego
+w oparciu o szyfrowany protokół SOCKS.
+
 =back
 
 =item B<protocolAuthentication> = basic | ntlm
@@ -700,6 +787,27 @@ hasło do negocjacji protokołu
 
 nazwa użytkownika do negocjacji protokołu
 
+=item B<PSKidentity> = TOŻSAMOŚĆ
+
+tożsamość klienta PSK
+
+I<PSKidentity> może zostać użyte w sekcjach klienckich do wybrania
+tożsamości użytej do uwierzytelnienia PSK.
+Opcja jest ignorowana w sekcjach serwerowych.
+
+domyślnie: pierwsza tożsamość zdefiniowana w pliku I<PSKsecrets>
+
+=item B<PSKsecrets> = PLIK
+
+plik z tożsamościami i kluczami PSK
+
+Każda linia pliku jest w następującym formacie:
+
+    TOŻSAMOŚĆ:KLUCZ
+
+Klucz musi być mieć przynajmniej 20 znaków.
+Należy ograniczyć dostęp do czytania lub pisania do tego pliku.
+
 =item B<pty> = yes | no (tylko Unix)
 
 alokuj pseudoterminal dla programu uruchamianego w opcji 'exec'
@@ -708,7 +816,7 @@ alokuj pseudoterminal dla programu uruchamianego w opcji 'exec'
 
 przekieruj klienta, któremu nie udało się poprawnie uwierzytelnić
 
-Ta opcja działa wyłącznie w trybie serwera, oraz przy wyłączonej negocjacji
+Opcja działa wyłącznie w trybie serwera, oraz przy wyłączonej negocjacji
 protokołu aplikacyjnego.
 
 =item B<renegotiation> = yes | no
@@ -732,7 +840,7 @@ domyślnie: yes (o ile wspierane przez B<OpenSSL>)
 
 sygnalizuj wystąpienie błędu przy pomocy flagi TCP RST
 
-Ta opcja nie jest wspierana na niektórych platformach.
+Opcja nie jest wspierana na niektórych platformach.
 
 domyślnie: yes
 
@@ -858,11 +966,20 @@ Przykładowana konfiguracja przezroczystego adresu docelowego:
     accept=<port_stunnela>
     transparent=destination
 
-Konfiguracja wymaga następujących ustawień iptables
-(na przykład w pliku /etc/rc.local lub analogicznym):
+Konfiguracja wymaga ustawień iptables, na przykład w pliku
+/etc/rc.local lub analogicznym.
+
+W przypadku docelowej usługi umieszczonej na tej samej maszynie:
+
+    /sbin/iptables -t nat -I OUTPUT -p tcp --dport <port_przekierowany> \
+        -m ! --uid-owner <identyfikator_użytkownika_stunnela> \
+        -j DNAT --to-destination <lokalne_ip>:<lokalny_port>
+
+W przypadku docelowej usługi umieszczonej na zdalnej maszynie:
 
     /sbin/iptables -I INPUT -i eth0 -p tcp --dport <port_stunnela> -j ACCEPT
-    /sbin/iptables -t nat -I PREROUTING -i eth0 -p tcp --dport <port_przekierowany> -j DNAT --to-destination <lokalne_ip>:<port_stunnela>
+    /sbin/iptables -t nat -I PREROUTING -p tcp --dport <port_przekierowany> \
+        -i eth0 -j DNAT --to-destination <lokalne_ip>:<port_stunnela>
 
 Przezroczysty adres docelowy jest aktualnie wspierany wyłącznie w systemie Linux.
 
@@ -1000,6 +1117,15 @@ albo w trybie zdalnym:
     accept = 993
     connect = 143
 
+Aby umożliwić lokalnemu klientowi poczty elektronicznej korzystanie z serwera
+I<imapd> przez SSL należy skonfigurować pobieranie poczty z adresu localhost i
+portu 119, oraz użyć następującej konfiguracji:
+
+    [imap]
+    client = yes
+    accept = 143
+    connect = serwer:993
+
 W połączeniu z programem I<pppd> B<stunnel> pozwala zestawić prosty VPN.
 Po stronie serwera nasłuchującego na porcie 2020 jego konfiguracja
 może wyglądać następująco:
@@ -1017,6 +1143,26 @@ konfiguracyjnym nie ma sekcji I<[nazwa_usługi]>.
     exec = /usr/sbin/imapd
     execargs = imapd
 
+Aby skonfigurować VPN można użyć następującej konfiguracji klienta:
+
+    [socks_client]
+    client = yes
+    accept = 127.0.0.1:1080
+    connect = vpn_server:9080
+    verify = 4
+    CAfile = stunnel.pem
+
+Odpowiadająca jej konfiguracja serwera vpn_server:
+
+    [socks_server]
+    protocol = socks
+    accept = 9080
+    cert = stunnel.pem
+    key = stunnel.key
+
+Do przetestowania konfiguracji można wydać na maszynie klienckiej komendę:
+
+    curl --socks4a localhost http://www.example.com/
 
 =head1 NOTKI
 

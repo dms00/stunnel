@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -38,11 +38,14 @@
 #include "common.h"
 #include "prototypes.h"
 
-NOEXPORT void log_raw(const int, const char *, const char *, const char *);
+NOEXPORT void log_raw(const SERVICE_OPTIONS *, const int,
+    const char *, const char *, const char *);
+NOEXPORT void safestring(char *);
 
 static DISK_FILE *outfile=NULL;
 static struct LIST { /* single-linked list of log lines */
     struct LIST *next;
+    SERVICE_OPTIONS *opt;
     int level;
     char *stamp, *id, *text;
 } *head=NULL, *tail=NULL;
@@ -56,9 +59,10 @@ void syslog_open(void) {
     syslog_close();
     if(global_options.option.syslog)
 #ifdef __ultrix__
-        openlog("stunnel", 0);
+        openlog(service_options.servname, 0);
 #else
-        openlog("stunnel", LOG_CONS|LOG_NDELAY, global_options.facility);
+        openlog(service_options.servname,
+            LOG_CONS|LOG_NDELAY, global_options.log_facility);
 #endif /* __ultrix__ */
     syslog_opened=1;
 }
@@ -77,10 +81,23 @@ int log_open(void) {
     if(global_options.output_file) { /* 'output' option specified */
         outfile=file_open(global_options.output_file,
             global_options.log_file_mode);
+#if defined(USE_WIN32) && !defined(_WIN32_WCE)
+        if(!outfile) {
+            char appdata[MAX_PATH], *path;
+            if(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA|CSIDL_FLAG_CREATE,
+                    NULL, 0, appdata)==S_OK) {
+                path=str_printf("%s\\%s", appdata, global_options.output_file);
+                outfile=file_open(path, global_options.log_file_mode);
+                if(outfile)
+                    s_log(LOG_NOTICE, "Logging to %s", path);
+                str_free(path);
+            }
+        }
+#endif
         if(!outfile) {
             s_log(LOG_ERR, "Cannot open log file: %s",
                 global_options.output_file);
-        return 1;
+            return 1;
         }
     }
     log_flush(LOG_MODE_CONFIGURED);
@@ -105,7 +122,7 @@ void log_flush(LOG_MODE new_mode) {
 
     enter_critical_section(CRIT_LOG);
     while(head) {
-        log_raw(head->level, head->stamp, head->id, head->text);
+        log_raw(head->opt, head->level, head->stamp, head->id, head->text);
         str_free(head->stamp);
         str_free(head->id);
         str_free(head->text);
@@ -120,7 +137,6 @@ void log_flush(LOG_MODE new_mode) {
 void s_log(int level, const char *format, ...) {
     va_list ap;
     char *text, *stamp, *id;
-    unsigned long tid;
     struct LIST *tmp;
     int libc_error, socket_error;
     time_t gmt;
@@ -128,14 +144,23 @@ void s_log(int level, const char *format, ...) {
 #if defined(HAVE_LOCALTIME_R) && defined(_REENTRANT)
     struct tm timestruct;
 #endif
+    TLS_DATA *tls_data;
+
+    tls_data=tls_get();
+    if(!tls_data) {
+        tls_data=tls_alloc(NULL, NULL, "log");
+        s_log(LOG_ERR, "INTERNAL ERROR: Uninitialized TLS at %s, line %d",
+            __FILE__, __LINE__);
+    }
 
     /* performance optimization: skip the trivial case early */
-    if(mode==LOG_MODE_CONFIGURED && level>global_options.debug_level)
+    if(mode==LOG_MODE_CONFIGURED && level>tls_data->opt->log_level)
         return;
 
     libc_error=get_last_error();
     socket_error=get_last_socket_error();
 
+    /* format the id to be logged */
     time(&gmt);
 #if defined(HAVE_LOCALTIME_R) && defined(_REENTRANT)
     timeptr=localtime_r(&gmt, &timestruct);
@@ -145,19 +170,19 @@ void s_log(int level, const char *format, ...) {
     stamp=str_printf("%04d.%02d.%02d %02d:%02d:%02d",
         timeptr->tm_year+1900, timeptr->tm_mon+1, timeptr->tm_mday,
         timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec);
-    tid=stunnel_thread_id();
-    if(!tid) /* currently USE_FORK */
-        tid=stunnel_process_id();
-    id=str_printf("LOG%d[%lu]", level, tid);
+    id=str_printf("LOG%d[%s]", level, tls_data->id);
+
+    /* format the text to be logged */
     va_start(ap, format);
     text=str_vprintf(format, ap);
     va_end(ap);
+    safestring(text);
 
     if(mode==LOG_MODE_NONE) { /* save the text to log it later */
         enter_critical_section(CRIT_LOG);
-        tmp=str_alloc(sizeof(struct LIST));
-        str_detach(tmp);
+        tmp=str_alloc_detached(sizeof(struct LIST));
         tmp->next=NULL;
+        tmp->opt=tls_data->opt;
         tmp->level=level;
         tmp->stamp=stamp;
         str_detach(tmp->stamp);
@@ -172,7 +197,7 @@ void s_log(int level, const char *format, ...) {
         tail=tmp;
         leave_critical_section(CRIT_LOG);
     } else { /* ready log the text directly */
-        log_raw(level, stamp, id, text);
+        log_raw(tls_data->opt, level, stamp, id, text);
         str_free(stamp);
         str_free(id);
         str_free(text);
@@ -182,14 +207,15 @@ void s_log(int level, const char *format, ...) {
     set_last_socket_error(socket_error);
 }
 
-NOEXPORT void log_raw(const int level, const char *stamp,
+NOEXPORT void log_raw(const SERVICE_OPTIONS *opt,
+        const int level, const char *stamp,
         const char *id, const char *text) {
     char *line;
 
     /* build the line and log it to syslog/file */
     if(mode==LOG_MODE_CONFIGURED) { /* configured */
         line=str_printf("%s %s: %s", stamp, id, text);
-        if(level<=global_options.debug_level) {
+        if(level<=opt->log_level) {
 #if !defined(USE_WIN32) && !defined(__vms)
             if(global_options.option.syslog)
                 syslog(level, "%s: %s", id, text);
@@ -209,9 +235,9 @@ NOEXPORT void log_raw(const int level, const char *stamp,
     if(mode==LOG_MODE_ERROR ||
             (mode==LOG_MODE_INFO && level<LOG_DEBUG) ||
 #if defined(USE_WIN32) || defined(USE_JNI)
-            level<=global_options.debug_level
+            level<=opt->log_level
 #else
-            (level<=global_options.debug_level &&
+            (level<=opt->log_level &&
             global_options.option.foreground)
 #endif
             )
@@ -220,44 +246,101 @@ NOEXPORT void log_raw(const int level, const char *stamp,
     str_free(line);
 }
 
-/* critical problem - str.c functions are not safe to use */
-void fatal_debug(char *error, char *file, int line) {
-    char text[80];
+char *log_id(CLI *c) {
+    static volatile unsigned long long seq=0;
+    unsigned long long my_seq;
+    const char table[62]=
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    unsigned char rnd[22];
+    char *uniq;
+    size_t i;
+    unsigned long tid;
+
+    switch(c->opt->log_id) {
+    case LOG_ID_SEQENTIAL:
+        enter_critical_section(CRIT_ID);
+        my_seq=seq++;
+        leave_critical_section(CRIT_ID);
+        return str_printf("%llu", my_seq);
+    case LOG_ID_UNIQUE:
+        uniq=str_alloc(22+1); /* log2(62^22)=130.99 */
+        RAND_pseudo_bytes(rnd, 22);
+        for(i=0; i<22; ++i) {
+            rnd[i]&=63;
+            while(rnd[i]>=62) {
+                RAND_pseudo_bytes(rnd+i, 1);
+                rnd[i]&=63;
+            }
+            uniq[i]=table[rnd[i]];
+        }
+        uniq[22]='\0';
+        return uniq;
+    case LOG_ID_THREAD:
+        tid=stunnel_thread_id();
+        if(!tid) /* currently USE_FORK */
+            tid=stunnel_process_id();
+        return str_printf("%lu", tid);
+    }
+    return str_dup("error");
+}
+
+/* critical problem handling */
+/* str.c functions are not safe to use here */
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
+#endif /* __GNUC__ */
+void fatal_debug(char *txt, const char *file, int line) {
+    char msg[80];
 #ifdef USE_WIN32
     DWORD num;
+#ifdef UNICODE
+    TCHAR tmsg[80];
+#endif
 #endif /* USE_WIN32 */
 
-    snprintf(text, sizeof text, /* with newline */
-        "INTERNAL ERROR: %s at %s, line %d\n", error, file, line);
+    snprintf(msg, sizeof msg, /* with newline */
+        "INTERNAL ERROR: %s at %s, line %d\n", txt, file, line);
 
     if(outfile) {
 #ifdef USE_WIN32
-        WriteFile(outfile->fh, text, strlen(text), &num, NULL);
+        WriteFile(outfile->fh, msg, strlen(msg), &num, NULL);
 #else /* USE_WIN32 */
         /* no file -> write to stderr */
-        write(outfile ? outfile->fd : 2, text, strlen(text));
+        /* no meaningful way here to handle the result */
+        write(outfile ? outfile->fd : 2, msg, strlen(msg));
 #endif /* USE_WIN32 */
     }
 
 #ifndef USE_WIN32
-    if(mode!=LOG_MODE_CONFIGURED || global_options.option.foreground)
-        fputs(text, stderr);
+    if(mode!=LOG_MODE_CONFIGURED || global_options.option.foreground) {
+        fputs(msg, stderr);
+        fflush(stderr);
+    }
 #endif /* !USE_WIN32 */
 
-    snprintf(text, sizeof text, /* without newline */
-        "INTERNAL ERROR: %s at %s, line %d", error, file, line);
+    snprintf(msg, sizeof msg, /* without newline */
+        "INTERNAL ERROR: %s at %s, line %d", txt, file, line);
 
 #if !defined(USE_WIN32) && !defined(__vms)
     if(global_options.option.syslog)
-        syslog(LOG_CRIT, "%s", text);
+        syslog(LOG_CRIT, "%s", msg);
 #endif /* USE_WIN32, __vms */
 
 #ifdef USE_WIN32
-    message_box(text, MB_ICONERROR);
+#ifdef UNICODE
+    if(MultiByteToWideChar(CP_UTF8, 0, msg, -1, tmsg, 80))
+        message_box(tmsg, MB_ICONERROR);
+#else
+    message_box(msg, MB_ICONERROR);
+#endif
 #endif /* USE_WIN32 */
 
     abort();
 }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif /* __GNUC__ */
 
 void ioerror(const char *txt) { /* input/output error */
     log_error(LOG_ERR, get_last_error(), txt);
@@ -382,6 +465,13 @@ char *s_strerror(int errnum) {
     default:
         return strerror(errnum);
     }
+}
+
+/* replace non-UTF-8 and non-printable control characters with '.' */
+NOEXPORT void safestring(char *c) {
+    for(; *c; ++c)
+        if(!(*c&0x80 || isprint(*c)))
+            *c='.';
 }
 
 /* end of log.c */
