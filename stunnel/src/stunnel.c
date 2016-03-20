@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -79,20 +79,39 @@ NOEXPORT void client_status(void); /* dead children detected */
 static int signal_pipe[2]={-1, -1};
 
 #ifndef USE_FORK
-int max_clients=0;
-volatile int num_clients=0; /* current number of clients */
+long max_clients=0;
+/* -1 before a valid config is loaded, then the current number of clients */
+volatile long num_clients=-1;
 #endif
 s_poll_set *fds; /* file descriptors of listening sockets */
+int systemd_fds; /* number of file descriptors passed by systemd */
+int listen_fds_start; /* base for systemd-provided file descriptors */
 
 /**************************************** startup */
 
-void main_initialize() { /* one-time initialization */
+void main_init() { /* one-time initialization */
+#ifdef USE_SYSTEMD
+    int i;
+
+    systemd_fds=sd_listen_fds(1);
+    if(systemd_fds<0)
+        fatal("systemd initialization failed");
+    listen_fds_start=SD_LISTEN_FDS_START;
+    /* set non-blocking mode on systemd file descriptors */
+    for(i=0; i<systemd_fds; ++i)
+        set_nonblock(listen_fds_start+i, 1);
+#else
+    systemd_fds=0; /* no descriptors received */
+    listen_fds_start=3; /* the value is not really important */
+#endif
     /* basic initialization contains essential functions required for logging
      * subsystem to function properly, thus all errors here are fatal */
     if(ssl_init()) /* initialize SSL library */
         fatal("SSL initialization failed");
     if(sthreads_init()) /* initialize critical sections & SSL callbacks */
         fatal("Threads initialization failed");
+    options_defaults();
+    options_apply();
 #ifndef USE_FORK
     get_limits(); /* required by setup_fd() */
 #endif
@@ -105,9 +124,10 @@ void main_initialize() { /* one-time initialization */
 
     /* configuration-dependent initialization */
 int main_configure(char *arg1, char *arg2) {
-    if(parse_commandline(arg1, arg2))
+    if(options_cmdline(arg1, arg2))
         return 1;
-    str_canary_init(); /* needs prng initialization from parse_commandline */
+    options_apply();
+    str_canary_init(); /* needs prng initialization from options_cmdline */
 #if !defined(USE_WIN32) && !defined(__vms)
     /* syslog_open() must be called before change_root()
      * to be able to access /dev/log socket */
@@ -132,9 +152,11 @@ int main_configure(char *arg1, char *arg2) {
      * since daemonize() invalidates stderr */
     if(log_open())
         return 1;
+#ifndef USE_FORK
+    num_clients=0; /* the first valid config */
+#endif
     return 0;
 }
-
 
 int drop_privileges(int critical) {
 #if defined(USE_WIN32) || defined(__vms) || defined(USE_OS2)
@@ -304,7 +326,7 @@ NOEXPORT int accept_connection(SERVICE_OPTIONS *opt) {
     RAND_add("", 1, 0.0); /* each child needs a unique entropy pool */
 #else
     if(max_clients && num_clients>=max_clients) {
-        s_log(LOG_WARNING, "Connection rejected: too many clients (>=%d)",
+        s_log(LOG_WARNING, "Connection rejected: too many clients (>=%ld)",
             max_clients);
         closesocket(s);
         return 0;
@@ -334,7 +356,9 @@ void unbind_ports(void) {
     for(opt=service_options.next; opt; opt=opt->next) {
         s_log(LOG_DEBUG, "Closing service [%s]", opt->servname);
         if(opt->option.accept && opt->fd>=0) {
-            closesocket(opt->fd);
+            if(opt->fd<listen_fds_start ||
+                    opt->fd>=listen_fds_start+systemd_fds)
+                closesocket(opt->fd);
             s_log(LOG_DEBUG, "Service [%s] closed (FD=%d)",
                 opt->servname, opt->fd);
             opt->fd=-1;
@@ -353,19 +377,17 @@ void unbind_ports(void) {
             }
 #endif
         } else if(opt->option.program && opt->option.remote) {
-            /* create exec+connect services */
-            /* FIXME: this is just a crude workaround */
+            /* create exec+connect services             */
+            /* FIXME: this is just a crude workaround   */
             /*        is it better to kill the service? */
             opt->option.retry=0;
         }
-        if(opt->ctx) {
-            s_log(LOG_DEBUG, "Sessions cached before flush: %ld",
-                SSL_CTX_sess_number(opt->ctx));
+        /* purge session cache of the old SSL_CTX object */
+        /* this workaround won't be needed anymore after */
+        /* delayed deallocation calls SSL_CTX_free()     */
+        if(opt->ctx)
             SSL_CTX_flush_sessions(opt->ctx,
                 (long)time(NULL)+opt->session_timeout+1);
-            s_log(LOG_DEBUG, "Sessions cached after flush: %ld",
-                SSL_CTX_sess_number(opt->ctx));
-        }
         s_log(LOG_DEBUG, "Service [%s] closed", opt->servname);
     }
 }
@@ -374,9 +396,10 @@ void unbind_ports(void) {
 int bind_ports(void) {
     SERVICE_OPTIONS *opt;
     char *local_address;
+    int listening_section;
 
 #ifdef USE_LIBWRAP
-    /* execute after parse_commandline() to know service_options.next,
+    /* execute after options_cmdline() to know service_options.next,
      * but as early as possible to avoid leaking file descriptors */
     /* retry on each bind_ports() in case stunnel.conf was reloaded
        without "libwrap = no" */
@@ -392,12 +415,22 @@ int bind_ports(void) {
         if(opt->option.accept)
             opt->fd=-1;
 
+    listening_section=0;
     for(opt=service_options.next; opt; opt=opt->next) {
         if(opt->option.accept) {
-            opt->fd=s_socket(opt->local_addr.sa.sa_family,
-                SOCK_STREAM, 0, 1, "accept socket");
-            if(opt->fd<0)
-                return 1;
+            if(listening_section<systemd_fds) {
+                opt->fd=listen_fds_start+listening_section;
+                s_log(LOG_DEBUG,
+                    "Listening file descriptor received from systemd (FD=%d)",
+                    opt->fd);
+            } else {
+                opt->fd=s_socket(opt->local_addr.sa.sa_family,
+                    SOCK_STREAM, 0, 1, "accept socket");
+                if(opt->fd<0)
+                    return 1;
+                s_log(LOG_DEBUG, "Listening file descriptor created (FD=%d)",
+                    opt->fd);
+            }
             if(set_socket_options(opt->fd, 0)<0) {
                 closesocket(opt->fd);
                 opt->fd=-1;
@@ -405,32 +438,42 @@ int bind_ports(void) {
             }
             /* local socket can't be unnamed */
             local_address=s_ntop(&opt->local_addr, addr_len(&opt->local_addr));
-            if(bind(opt->fd, &opt->local_addr.sa, addr_len(&opt->local_addr))) {
-                s_log(LOG_ERR, "Error binding service [%s] to %s",
-                    opt->servname, local_address);
-                sockerror("bind");
-                closesocket(opt->fd);
-                opt->fd=-1;
-                str_free(local_address);
-                return 1;
-            }
-            if(listen(opt->fd, SOMAXCONN)) {
-                sockerror("listen");
-                closesocket(opt->fd);
-                opt->fd=-1;
-                str_free(local_address);
-                return 1;
+            /* we don't bind or listen on a socket inherited from systemd */
+            if(listening_section>=systemd_fds) {
+                if(bind(opt->fd, &opt->local_addr.sa, addr_len(&opt->local_addr))) {
+                    s_log(LOG_ERR, "Error binding service [%s] to %s",
+                        opt->servname, local_address);
+                    sockerror("bind");
+                    closesocket(opt->fd);
+                    opt->fd=-1;
+                    str_free(local_address);
+                    return 1;
+                }
+                if(listen(opt->fd, SOMAXCONN)) {
+                    sockerror("listen");
+                    closesocket(opt->fd);
+                    opt->fd=-1;
+                    str_free(local_address);
+                    return 1;
+                }
             }
             s_poll_add(fds, opt->fd, 1, 0);
             s_log(LOG_DEBUG, "Service [%s] (FD=%d) bound to %s",
                 opt->servname, opt->fd, local_address);
             str_free(local_address);
+            ++listening_section;
         } else if(opt->option.program && opt->option.remote) {
             /* create exec+connect services */
             /* FIXME: needs to be delayed on reload with opt->option.retry set */
             create_client(-1, -1,
                 alloc_client_session(opt, -1, -1), client_thread);
         }
+    }
+    if(listening_section<systemd_fds) {
+        s_log(LOG_ERR,
+            "Too many listening file descriptors received from systemd, got %d",
+            systemd_fds);
+        return 1;
     }
     return 0; /* OK */
 }
@@ -493,12 +536,20 @@ NOEXPORT int signal_pipe_init(void) {
     return 0;
 }
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
+#endif /* __GNUC__ */
 void signal_post(int sig) {
+    /* no meaningful way here to handle the result */
     writesocket(signal_pipe[1], (char *)&sig, sizeof sig);
 }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif /* __GNUC__ */
 
 NOEXPORT int signal_pipe_dispatch(void) {
-    int sig, err;
+    int sig;
 
     s_log(LOG_DEBUG, "Dispatching signals from the signal pipe");
     while(readsocket(signal_pipe[0], (char *)&sig, sizeof sig)==sizeof sig) {
@@ -515,14 +566,14 @@ NOEXPORT int signal_pipe_dispatch(void) {
 #endif /* !defind USE_WIN32 */
         case SIGNAL_RELOAD_CONFIG:
             s_log(LOG_DEBUG, "Processing SIGNAL_RELOAD_CONFIG");
-            err=parse_conf(CONF_RELOAD);
-            if(err) {
+            if(options_parse(CONF_RELOAD)) {
                 s_log(LOG_ERR, "Failed to reload the configuration file");
             } else {
                 unbind_ports();
                 log_close();
-                apply_conf();
+                options_apply();
                 log_open();
+                ui_config_reloaded();
                 if(bind_ports()) {
                     /* FIXME: handle the error */
                 }
@@ -581,24 +632,50 @@ void stunnel_info(int level) {
         "SELECT"
 #endif /* defined(USE_POLL) */
         ",IPv%c"
+#ifdef USE_SYSTEMD
+        ",SYSTEMD"
+#endif /* defined(USE_SYSTEMD) */
 
-#if defined HAVE_OSSL_ENGINE_H || defined HAVE_OSSL_OCSP_H || defined USE_FIPS
-        " SSL:"
-#define ITEM_SEPARATOR ""
-#ifdef HAVE_OSSL_ENGINE_H
+        " TLS:"
+#ifndef OPENSSL_NO_ENGINE
+#define TLS_FEATURE_FOUND
         "ENGINE"
-#undef ITEM_SEPARATOR
-#define ITEM_SEPARATOR ","
-#endif /* defined(HAVE_OSSL_ENGINE_H) */
-#ifdef HAVE_OSSL_OCSP_H
-        ITEM_SEPARATOR "OCSP"
-#undef ITEM_SEPARATOR
-#define ITEM_SEPARATOR ","
-#endif /* HAVE_OSSL_OCSP_H */
+#endif /* !defined(OPENSSL_NO_ENGINE) */
 #ifdef USE_FIPS
-        ITEM_SEPARATOR "FIPS"
-#endif /* USE_FIPS */
-#endif /* an SSL optional feature enabled */
+#ifdef TLS_FEATURE_FOUND
+        ","
+#else
+#define TLS_FEATURE_FOUND
+#endif
+        "FIPS"
+#endif /* defined(USE_FIPS) */
+#ifndef OPENSSL_NO_OCSP
+#ifdef TLS_FEATURE_FOUND
+        ","
+#else
+#define TLS_FEATURE_FOUND
+#endif
+        "OCSP"
+#endif /* !defined(OPENSSL_NO_OCSP) */
+#ifndef OPENSSL_NO_PSK
+#ifdef TLS_FEATURE_FOUND
+        ","
+#else
+#define TLS_FEATURE_FOUND
+#endif
+        "PSK"
+#endif /* !defined(OPENSSL_NO_PSK) */
+#ifndef OPENSSL_NO_TLSEXT
+#ifdef TLS_FEATURE_FOUND
+        ","
+#else
+#define TLS_FEATURE_FOUND
+#endif
+        "SNI"
+#endif /* !defined(OPENSSL_NO_TLSEXT) */
+#ifndef TLS_FEATURE_FOUND
+        "NONE"
+#endif /* !defined(TLS_FEATURE_FOUND) */
 
 #ifdef USE_LIBWRAP
         " Auth:LIBWRAP"

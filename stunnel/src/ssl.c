@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -39,20 +39,26 @@
 #include "prototypes.h"
 
     /* global OpenSSL initalization: compression, engine, entropy */
-NOEXPORT int init_compression(GLOBAL_OPTIONS *);
-NOEXPORT int init_prng(GLOBAL_OPTIONS *);
+NOEXPORT int compression_init(GLOBAL_OPTIONS *);
+NOEXPORT int prng_init(GLOBAL_OPTIONS *);
 NOEXPORT int add_rand_file(GLOBAL_OPTIONS *, const char *);
 
-int cli_index, opt_index; /* to keep structure for callbacks */
+int cli_index, opt_index, redirect_index; /* to keep structure for callbacks */
 
 int ssl_init(void) { /* init SSL before parsing configuration file */
     SSL_load_error_strings();
     SSL_library_init();
-    cli_index=SSL_get_ex_new_index(0, "cli index", NULL, NULL, NULL);
-    opt_index=SSL_CTX_get_ex_new_index(0, "opt index", NULL, NULL, NULL);
-    if(cli_index<0 || opt_index<0)
+    cli_index=SSL_get_ex_new_index(0, "cli pointer index",
+        NULL, NULL, NULL);
+    opt_index=SSL_CTX_get_ex_new_index(0, "opt pointer index",
+        NULL, NULL, NULL);
+    redirect_index=SSL_SESSION_get_ex_new_index(0, "redirect value index",
+        NULL, NULL, NULL);
+    if(cli_index<0 || opt_index<0 || redirect_index<0) {
+        s_log(LOG_ERR, "Application specific data initialization failed");
         return 1;
-#ifdef HAVE_OSSL_ENGINE_H
+    }
+#ifndef OPENSSL_NO_ENGINE
     ENGINE_load_builtin_engines();
 #endif
     return 0;
@@ -71,21 +77,22 @@ int ssl_configure(GLOBAL_OPTIONS *global) { /* configure global SSL settings */
     s_log(LOG_NOTICE, "FIPS mode %s",
         global->option.fips ? "enabled" : "disabled");
 #endif /* USE_FIPS */
-    if(init_compression(global))
+#ifndef OPENSSL_NO_COMP
+    if(compression_init(global))
         return 1;
-    if(init_prng(global))
+#endif /* OPENSSL_NO_COMP */
+    if(prng_init(global))
         return 1;
     s_log(LOG_DEBUG, "PRNG seeded successfully");
     return 0; /* SUCCESS */
 }
 
-NOEXPORT int init_compression(GLOBAL_OPTIONS *global) {
 #ifndef OPENSSL_NO_COMP
-    SSL_COMP *comp;
-    STACK_OF(SSL_COMP) *ssl_comp_methods;
+NOEXPORT int compression_init(GLOBAL_OPTIONS *global) {
+    STACK_OF(SSL_COMP) *methods;
 
-    ssl_comp_methods=SSL_COMP_get_compression_methods();
-    if(!ssl_comp_methods) {
+    methods=SSL_COMP_get_compression_methods();
+    if(!methods) {
         if(global->compression==COMP_NONE) {
             s_log(LOG_NOTICE, "Failed to get compression methods");
             return 0; /* ignore */
@@ -95,68 +102,39 @@ NOEXPORT int init_compression(GLOBAL_OPTIONS *global) {
         }
     }
 
-    /* delete OpenSSL defaults (empty the SSL_COMP stack) */
-    /* cannot use sk_SSL_COMP_pop_free, as it also destroys the stack itself */
-    while(sk_SSL_COMP_num(ssl_comp_methods))
-        OPENSSL_free(sk_SSL_COMP_pop(ssl_comp_methods));
+    if(global->compression==COMP_NONE ||
+            SSLeay()<0x00908051L /* 0.9.8e-beta1 */) {
+        /* delete OpenSSL defaults (empty the SSL_COMP stack) */
+        /* cannot use sk_SSL_COMP_pop_free,
+         * as it also destroys the stack itself */
+        /* only leave the standard RFC 1951 (DEFLATE) algorithm,
+         * if any of the private algorithms is enabled */
+        /* only allow DEFLATE with OpenSSL 0.9.8 or later
+         * with OpenSSL #1468 zlib memory leak fixed */
+        while(sk_SSL_COMP_num(methods))
+            OPENSSL_free(sk_SSL_COMP_pop(methods));
+    }
 
     if(global->compression==COMP_NONE) {
         s_log(LOG_DEBUG, "Compression disabled");
         return 0; /* success */
     }
 
-    /* insert RFC 1951 (DEFLATE) algorithm */
-    if(SSLeay()>=0x00908051L) { /* 0.9.8e-beta1 */
-        /* only allow DEFLATE with OpenSSL 0.9.8 or later
-           with openssl #1468 zlib memory leak fixed */
-        comp=(SSL_COMP *)OPENSSL_malloc(sizeof(SSL_COMP));
-        if(!comp) {
-            s_log(LOG_ERR, "OPENSSL_malloc filed");
-            return 1;
-        }
-        comp->id=1; /* RFC 1951 */
-        comp->method=COMP_zlib();
-        if(!comp->method || comp->method->type==NID_undef) {
-            OPENSSL_free(comp);
-            s_log(LOG_ERR, "Failed to initialize compression method");
-            return 1;
-        }
-        comp->name=comp->method->name;
-        sk_SSL_COMP_push(ssl_comp_methods, comp);
-    }
-
     /* also insert one of obsolete (ZLIB/RLE) algorithms */
-    comp=(SSL_COMP *)OPENSSL_malloc(sizeof(SSL_COMP));
-    if(!comp) {
-        s_log(LOG_ERR, "OPENSSL_malloc filed");
-        return 1;
-    }
     if(global->compression==COMP_ZLIB) {
-        comp->id=0xe0; /* 224 - within private range (193 to 255) */
-        comp->method=COMP_zlib();
+        /* 224 - within the private range (193 to 255) */
+        SSL_COMP_add_compression_method(0xe0, COMP_zlib());
     } else if(global->compression==COMP_RLE) {
-        comp->id=0xe1; /* 225 - within private range (193 to 255) */
-        comp->method=COMP_rle();
-    } else {
-        s_log(LOG_INFO, "Compression enabled: %d algorithm(s)",
-            sk_SSL_COMP_num(ssl_comp_methods));
-        OPENSSL_free(comp);
-        return 0;
+        /* 225 - within the private range (193 to 255) */
+        SSL_COMP_add_compression_method(0xe1, COMP_rle());
     }
-    if(!comp->method || comp->method->type==NID_undef) {
-        OPENSSL_free(comp);
-        s_log(LOG_ERR, "Failed to initialize compression method");
-        return 1;
-    }
-    comp->name=comp->method->name;
-    sk_SSL_COMP_push(ssl_comp_methods, comp);
-    s_log(LOG_INFO, "Compression enabled: %d algorithm(s)",
-        sk_SSL_COMP_num(ssl_comp_methods));
-#endif /* OPENSSL_NO_COMP */
+    s_log(LOG_INFO, "Compression enabled: %d method(s)",
+        sk_SSL_COMP_num(methods));
     return 0; /* success */
 }
+#endif /* OPENSSL_NO_COMP */
 
-NOEXPORT int init_prng(GLOBAL_OPTIONS *global) {
+NOEXPORT int prng_init(GLOBAL_OPTIONS *global) {
     int totbytes=0;
     char filename[256];
 #ifndef USE_WIN32

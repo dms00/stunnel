@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -55,7 +55,7 @@ NOEXPORT int setup_fd(int, int, char *);
 
 #ifndef USE_FORK
 
-static int max_fds;
+static long max_fds;
 
 void get_limits(void) { /* set max_fds and max_clients */
     /* start with current ulimit */
@@ -90,7 +90,7 @@ void get_limits(void) { /* set max_fds and max_clients */
 
     if(max_fds) {
         max_clients=max_fds>=256 ? max_fds*125/256 : (max_fds-6)/2;
-        s_log(LOG_DEBUG, "Clients allowed=%d", max_clients);
+        s_log(LOG_DEBUG, "Clients allowed=%ld", max_clients);
     } else {
         max_clients=0;
         s_log(LOG_DEBUG, "No limit detected for the number of clients");
@@ -102,12 +102,21 @@ void get_limits(void) { /* set max_fds and max_clients */
 /**************************************** file descriptor validation */
 
 int s_socket(int domain, int type, int protocol, int nonblock, char *msg) {
+    int fd;
+
 #ifdef USE_NEW_LINUX_API
     if(nonblock)
         type|=SOCK_NONBLOCK;
     type|=SOCK_CLOEXEC;
 #endif
-    return setup_fd(socket(domain, type, protocol), nonblock, msg);
+#ifdef USE_WIN32
+    /* http://stackoverflow.com/questions/4993119 */
+    /* CreateProcess() needs a non-overlapped handle */
+    fd=WSASocket(domain, type, protocol, NULL, 0, 0);
+#else /* USE_WIN32 */
+    fd=socket(domain, type, protocol);
+#endif /* USE_WIN32 */
+    return setup_fd(fd, nonblock, msg);
 }
 
 int s_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen,
@@ -188,7 +197,7 @@ NOEXPORT int setup_fd(int fd, int nonblock, char *msg) {
     }
 #ifndef USE_FORK
     if(max_fds && fd>=max_fds) {
-        s_log(LOG_ERR, "%s: FD=%d out of range (max %d)",
+        s_log(LOG_ERR, "%s: FD=%d out of range (max %ld)",
             msg, fd, max_fds);
         closesocket(fd);
         return -1;
@@ -198,7 +207,7 @@ NOEXPORT int setup_fd(int fd, int nonblock, char *msg) {
 #ifdef USE_NEW_LINUX_API
     (void)nonblock; /* skip warning about unused parameter */
 #else /* set O_NONBLOCK and F_SETFD */
-    set_nonblock(fd, nonblock);
+    set_nonblock(fd, (unsigned long)nonblock);
 #ifdef FD_CLOEXEC
     do {
         err=fcntl(fd, F_SETFD, FD_CLOEXEC);

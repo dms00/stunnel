@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -54,7 +54,8 @@
 #else /* MSDN claims that _WIN32 is always defined */
 #define STUNNEL_PLATFORM "Win32"
 #endif
-#define SERVICE_NAME "stunnel"
+#define SERVICE_NAME TEXT("stunnel")
+#define SERVICE_DISPLAY_NAME TEXT("Stunnel SSL wrapper")
 #endif
 
 /* mingw-Patches-1825044 is missing in Debian Squeeze */
@@ -62,16 +63,17 @@ WINBASEAPI BOOL WINAPI CheckTokenMembership(HANDLE, PSID, PBOOL);
 
 /* prototypes */
 NOEXPORT BOOL CALLBACK enum_windows(HWND, LPARAM);
-NOEXPORT void parse_cmdline(LPSTR);
+NOEXPORT void gui_cmdline();
 NOEXPORT int initialize_winsock(void);
 NOEXPORT int gui_loop();
 
+NOEXPORT void CALLBACK timer_proc(HWND, UINT, UINT_PTR, DWORD);
 NOEXPORT LRESULT CALLBACK window_proc(HWND, UINT, WPARAM, LPARAM);
 NOEXPORT LRESULT CALLBACK about_proc(HWND, UINT, WPARAM, LPARAM);
 NOEXPORT LRESULT CALLBACK pass_proc(HWND, UINT, WPARAM, LPARAM);
 
 NOEXPORT void save_log(void);
-NOEXPORT void win_log(LPSTR);
+NOEXPORT void win_log(LPCTSTR);
 NOEXPORT int save_text_file(LPTSTR, char *);
 NOEXPORT void update_logs(void);
 NOEXPORT LPTSTR log_txt(void);
@@ -81,21 +83,24 @@ NOEXPORT void daemon_thread(void *);
 NOEXPORT void valid_config(void);
 NOEXPORT void invalid_config(void);
 NOEXPORT void update_peer_menu(void);
-NOEXPORT void update_tray_icon(const int);
-NOEXPORT void error_box(const LPSTR);
+NOEXPORT void update_tray(const int);
+NOEXPORT void error_box(LPCTSTR);
 NOEXPORT void edit_config(HWND);
 NOEXPORT BOOL is_admin(void);
 
 /* NT Service related function */
 #ifndef _WIN32_WCE
 NOEXPORT int service_initialize(void);
-NOEXPORT int service_install(LPTSTR);
+NOEXPORT int service_install(void);
 NOEXPORT int service_uninstall(void);
 NOEXPORT int service_start(void);
 NOEXPORT int service_stop(void);
 NOEXPORT void WINAPI service_main(DWORD, LPTSTR *);
 NOEXPORT void WINAPI control_handler(DWORD);
 #endif /* !defined(_WIN32_WCE) */
+
+/* other functions */
+NOEXPORT LPTSTR get_params();
 
 /* global variables */
 static struct LIST {
@@ -104,7 +109,7 @@ static struct LIST {
   TCHAR txt[1]; /* single character for trailing '\0' */
 } *head=NULL, *tail=NULL;
 
-static unsigned int number_of_sections=0;
+static unsigned number_of_sections=0;
 
 static HINSTANCE ghInst;
 static HWND edit_handle=NULL;
@@ -126,8 +131,8 @@ static SERVICE_STATUS serviceStatus;
 static SERVICE_STATUS_HANDLE serviceStatusHandle=0;
 #endif
 
-static volatile int visible=0;
-static volatile int error_mode=1; /* no valid configuration was ever loaded */
+static BOOL visible=FALSE;
+static HANDLE main_initialized=NULL; /* global initialization performed */
 static HANDLE config_ready=NULL; /* reload without a valid configuration */
 static LONG new_logs=0;
 
@@ -135,7 +140,7 @@ static UI_DATA *ui_data=NULL;
 
 static struct {
     char *config_file;
-    unsigned int service:1, install:1, uninstall:1, start:1, stop:1,
+    unsigned service:1, install:1, uninstall:1, start:1, stop:1,
         quiet:1, exit:1;
 } cmdline;
 
@@ -148,25 +153,19 @@ int WINAPI WinMain(HINSTANCE this_instance, HINSTANCE prev_instance,
         LPSTR lpCmdLine,
 #endif
         int nCmdShow) {
-    LPSTR command_line;
-    char *c, stunnel_exe_path[MAX_PATH];
+    TCHAR stunnel_exe_path[MAX_PATH];
+    LPTSTR c;
 #ifndef _WIN32_WCE
-    char *errmsg;
+    LPTSTR errmsg;
 #endif
 
     (void)prev_instance; /* skip warning about unused parameter */
+    (void)lpCmdLine; /* skip warning about unused parameter */
     (void)nCmdShow; /* skip warning about unused parameter */
 
-    str_init(); /* initialize per-thread string management */
+    tls_init(); /* initialize thread-local storage */
     ghInst=this_instance;
-#ifdef _WIN32_WCE
-    command_line=tstr2str(lpCmdLine);
-#else
-    command_line=lpCmdLine;
-#endif
-
-    parse_cmdline(command_line); /* setup global cmdline structure */
-
+    gui_cmdline(); /* setup global cmdline structure */
     GetModuleFileName(0, stunnel_exe_path, MAX_PATH);
 
 #ifndef _WIN32_WCE
@@ -180,18 +179,19 @@ int WINAPI WinMain(HINSTANCE this_instance, HINSTANCE prev_instance,
 #endif
 
     /* set current working directory and engine path */
-    c=strrchr(stunnel_exe_path, '\\'); /* last backslash */
+    c=_tcsrchr(stunnel_exe_path, TEXT('\\')); /* last backslash */
     if(c) /* found */
-        c[1]='\0'; /* truncate program name */
+        c[1]=TEXT('\0'); /* truncate program name */
 #ifndef _WIN32_WCE
     if(!SetCurrentDirectory(stunnel_exe_path)) {
-        errmsg=str_printf("Cannot set directory to %s", stunnel_exe_path);
+        errmsg=str_tprintf(TEXT("Cannot set directory to %s"),
+            stunnel_exe_path);
         message_box(errmsg, MB_ICONERROR);
         str_free(errmsg);
         return 1;
     }
 #endif
-    _putenv_s("OPENSSL_ENGINES", stunnel_exe_path);
+    _tputenv(str_tprintf(TEXT("OPENSSL_ENGINES=%s"), stunnel_exe_path));
 
     if(initialize_winsock())
         return 1;
@@ -200,7 +200,7 @@ int WINAPI WinMain(HINSTANCE this_instance, HINSTANCE prev_instance,
     if(cmdline.service) /* "-service" must be processed before "-install" */
         return service_initialize();
     if(cmdline.install)
-        return service_install(command_line);
+        return service_install();
     if(cmdline.uninstall)
         return service_uninstall();
     if(cmdline.start)
@@ -216,9 +216,9 @@ int WINAPI WinMain(HINSTANCE this_instance, HINSTANCE prev_instance,
 NOEXPORT BOOL CALLBACK enum_windows(HWND other_window_handle, LPARAM lParam) {
     DWORD pid;
     HINSTANCE hInstance;
-    char window_exe_path[MAX_PATH];
     HANDLE process_handle;
-    char *stunnel_exe_path=(char *)lParam;
+    TCHAR window_exe_path[MAX_PATH];
+    LPTSTR stunnel_exe_path=(LPTSTR)lParam;
 
     if(!other_window_handle)
         return TRUE;
@@ -235,7 +235,7 @@ NOEXPORT BOOL CALLBACK enum_windows(HWND other_window_handle, LPARAM lParam) {
         CloseHandle(process_handle);
         return TRUE;
     }
-    if(strcmp(stunnel_exe_path, window_exe_path)) {
+    if(_tcscmp(stunnel_exe_path, window_exe_path)) {
         CloseHandle(process_handle);
         return TRUE;
     }
@@ -256,12 +256,11 @@ NOEXPORT BOOL CALLBACK enum_windows(HWND other_window_handle, LPARAM lParam) {
 
 #endif
 
-NOEXPORT void parse_cmdline(LPSTR command_line) {
+NOEXPORT void gui_cmdline() {
     char *line, *c, *opt;
 
-    line=str_dup(command_line);
+    line=tstr2str(get_params());
     memset(&cmdline, 0, sizeof cmdline);
-
     c=line;
     while(*c && (*c=='/' || *c=='-')) {
         opt=c;
@@ -283,12 +282,20 @@ NOEXPORT void parse_cmdline(LPSTR command_line) {
             cmdline.quiet=1;
         else if(!strcasecmp(opt+1, "exit"))
             cmdline.exit=1;
-        else { /* option to be processed in options.c */
+        else { /* an option to be processed in options.c */
             c=opt;
             break;
         }
     }
-    cmdline.config_file=*c ? str_dup(c) : NULL;
+    if(*c=='\"') { /* the option is within double quotes */
+        c++;
+        opt=c;
+        while(*c && *c!='\"') /* find the closing double quote */
+            c++;
+        *c='\0';
+    } else /* the option is simply the rest of the line */
+        opt=c;
+    cmdline.config_file=*opt ? str_dup(opt) : NULL;
     str_free(line);
 }
 
@@ -297,7 +304,7 @@ NOEXPORT int initialize_winsock() {
     static struct WSAData wsa_state;
 
     if(WSAStartup(MAKEWORD( 2, 2 ), &wsa_state)) {
-        message_box("Failed to initialize winsock", MB_ICONERROR);
+        message_box(TEXT("Failed to initialize winsock"), MB_ICONERROR);
         return 1; /* error */
     }
     resolver_init();
@@ -344,30 +351,50 @@ NOEXPORT int gui_loop() {
         NULL, NULL, ghInst, NULL);
 #else
     main_menu_handle=LoadMenu(ghInst, MAKEINTRESOURCE(IDM_MAINMENU));
+    if(main_menu_handle && cmdline.service) {
+        /* block unsafe operations in the service mode */
+        EnableMenuItem(main_menu_handle, IDM_EDIT_CONFIG, MF_GRAYED);
+        EnableMenuItem(main_menu_handle, IDM_SAVE_LOG, MF_GRAYED);
+    }
     hwnd=CreateWindow(classname, win32_name, WS_TILEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
         NULL, main_menu_handle, ghInst, NULL);
-
-    if(cmdline.service) { /* block unsafe operations in the service mode */
-        if(main_menu_handle) {
-            EnableMenuItem(main_menu_handle, IDM_EDIT_CONFIG, MF_GRAYED);
-            EnableMenuItem(main_menu_handle, IDM_SAVE_LOG, MF_GRAYED);
-        }
-        if(tray_menu_handle) {
-            EnableMenuItem(tray_menu_handle, IDM_EDIT_CONFIG, MF_GRAYED);
-        }
-    }
 #endif
-    /* auto-reset, non-signaled */
+
+    /* auto-reset, non-signaled events */
+    main_initialized=CreateEvent(NULL, FALSE, FALSE, NULL);
     config_ready=CreateEvent(NULL, FALSE, FALSE, NULL);
+    /* hwnd needs to be initialized before _beginthread() */
     _beginthread(daemon_thread, DEFAULT_STACK_SIZE, NULL);
+    WaitForSingleObject(main_initialized, INFINITE);
+    /* logging subsystem is now available */
 
-    while(GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
+    /* setup periodic event to trigger update_logs() */
+    SetTimer(NULL, 0, 1000, timer_proc); /* run callback once per second */
 
-    return msg.wParam;
+    s_log(LOG_DEBUG, "GUI message loop initialized");
+    for(;;)
+        switch(GetMessage(&msg, NULL, 0, 0)) {
+        case -1:
+            ioerror("GetMessage");
+            return 0;
+        case 0:
+            s_log(LOG_DEBUG, "GUI message loop terminated");
+            return msg.wParam;
+        default:
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+}
+
+NOEXPORT void CALLBACK timer_proc(HWND hwnd, UINT msg, UINT_PTR id, DWORD t) {
+    (void)hwnd; /* skip warning about unused parameter */
+    (void)msg; /* skip warning about unused parameter */
+    (void)id; /* skip warning about unused parameter */
+    (void)t; /* skip warning about unused parameter */
+    if(visible)
+        update_logs();
+    update_tray(num_clients); /* needed when explorer.exe (re)starts */
 }
 
 NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
@@ -375,12 +402,21 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
     NOTIFYICONDATA nid;
     POINT pt;
     RECT rect;
+    PAINTSTRUCT ps;
     SERVICE_OPTIONS *section;
-    unsigned int section_number;
+    unsigned section_number;
+    LPTSTR txt;
 
 #if 0
-    if(message!=WM_CTLCOLORSTATIC && message!=WM_TIMER)
-        s_log(LOG_DEBUG, "Window message: %d", message);
+    switch(message) {
+    case WM_CTLCOLORSTATIC:
+    case WM_TIMER:
+    case WM_LOG:
+        break;
+    default:
+        s_log(LOG_DEBUG, "Window message: 0x%x(0x%hx,0x%lx)",
+            message, wParam, lParam);
+    }
 #endif
     switch(message) {
     case WM_CREATE:
@@ -388,15 +424,15 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
         /* create command bar */
         command_bar_handle=CommandBar_Create(ghInst, main_window_handle, 1);
         if(!command_bar_handle)
-            error_box("CommandBar_Create");
+            error_box(TEXT("CommandBar_Create"));
         if(!CommandBar_InsertMenubar(command_bar_handle, ghInst, IDM_MAINMENU, 0))
-            error_box("CommandBar_InsertMenubar");
+            error_box(TEXT("CommandBar_InsertMenubar"));
         if(!CommandBar_AddAdornments(command_bar_handle, 0, 0))
-            error_box("CommandBar_AddAdornments");
+            error_box(TEXT("CommandBar_AddAdornments"));
 #endif
 
         /* create child edit window */
-        edit_handle=CreateWindow(TEXT("EDIT"), NULL,
+        edit_handle=CreateWindowEx(WS_EX_STATICEDGE, TEXT("EDIT"), NULL,
             WS_CHILD|WS_VISIBLE|WS_HSCROLL|WS_VSCROLL|ES_MULTILINE|ES_READONLY,
             0, 0, 0, 0, main_window_handle, (HMENU)IDE_EDIT, ghInst, NULL);
 #ifndef _WIN32_WCE
@@ -404,7 +440,7 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
             (WPARAM)CreateFont(-12, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_RASTER_PRECIS, CLIP_DEFAULT_PRECIS,
                 PROOF_QUALITY, DEFAULT_PITCH, TEXT("Courier")),
-            MAKELPARAM(FALSE, 0)); /* no need to redraw right, now */
+            MAKELPARAM(FALSE, 0)); /* no need to redraw right now */
 #endif
         /* NOTE: there's no return statement here -> proceeding with resize */
 
@@ -412,45 +448,61 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
         GetClientRect(main_window_handle, &rect);
 #ifdef _WIN32_WCE
         MoveWindow(edit_handle, 0, CommandBar_Height(command_bar_handle),
-            rect.right, rect.bottom-CommandBar_Height(command_bar_handle), TRUE);
+            rect.right, rect.bottom-CommandBar_Height(command_bar_handle),
+            TRUE);
+        SendMessage(command_bar_handle, TB_AUTOSIZE, 0L, 0L);
+        CommandBar_AlignAdornments(command_bar_handle);
 #else
         MoveWindow(edit_handle, 0, 0, rect.right, rect.bottom, TRUE);
 #endif
         UpdateWindow(edit_handle);
         /* CommandBar_Show(command_bar_handle, TRUE); */
-        return TRUE;
+        return 0;
 
     case WM_SETFOCUS:
         SetFocus(edit_handle);
-        return TRUE;
+        return 0;
 
-    case WM_TIMER:
-        if(visible)
-            update_logs();
-        return TRUE;
+    case WM_PAINT:
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        break;
 
     case WM_CLOSE:
         ShowWindow(main_window_handle, SW_HIDE);
-        return TRUE;
+        return 0;
 
+#ifdef WM_SHOWWINDOW
     case WM_SHOWWINDOW:
-        visible=wParam; /* setup global variable */
+        visible=(BOOL)wParam;
+#else /* this works for Pierre Delaage, but not for me... */
+    case WM_WINDOWPOSCHANGED:
+        visible=IsWindowVisible(main_window_handle);
+#endif
         if(tray_menu_handle)
             CheckMenuItem(tray_menu_handle, IDM_SHOW_LOG,
                 visible ? MF_CHECKED : MF_UNCHECKED);
         if(visible)
             update_logs();
-        return TRUE;
+#ifdef WM_SHOWWINDOW
+        return 0;
+#else
+        break; /* proceed to DefWindowProc() */
+#endif
 
     case WM_DESTROY:
 #ifdef _WIN32_WCE
         CommandBar_Destroy(command_bar_handle);
 #else
-        if(main_menu_handle)
+        if(main_menu_handle) {
             DestroyMenu(main_menu_handle);
+            main_menu_handle=NULL;
+        }
 #endif
-        if(tray_menu_handle)
+        if(tray_menu_handle) {
             DestroyMenu(tray_menu_handle);
+            tray_menu_handle=NULL;
+        }
         ZeroMemory(&nid, sizeof nid);
         nid.cbSize=sizeof nid;
         nid.hWnd=main_window_handle;
@@ -458,8 +510,7 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
         nid.uFlags=NIF_TIP; /* not really sure what to put here, but it works */
         Shell_NotifyIcon(NIM_DELETE, &nid); /* this removes the icon */
         PostQuitMessage(0);
-        KillTimer(main_window_handle, 0x29a);
-        return TRUE;
+        return 0;
 
     case WM_COMMAND:
         if(wParam>=IDM_PEER_MENU && wParam<IDM_PEER_MENU+number_of_sections) {
@@ -468,9 +519,9 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
                     section=section->next, ++section_number)
                 ;
             if(!section)
-                return TRUE;
+                return 0;
             if(save_text_file(section->file, section->chain))
-                return TRUE;
+                return 0;
 #ifndef _WIN32_WCE
             if(main_menu_handle)
                 CheckMenuItem(main_menu_handle, wParam, MF_CHECKED);
@@ -478,7 +529,7 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
             if(tray_menu_handle)
                 CheckMenuItem(tray_menu_handle, wParam, MF_CHECKED);
             message_box(section->help, MB_ICONINFORMATION);
-            return TRUE;
+            return 0;
         }
         switch(wParam) {
         case IDM_ABOUT:
@@ -497,7 +548,7 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
             ShowWindow(main_window_handle, SW_HIDE); /* hide window */
             break;
         case IDM_EXIT:
-            if(!error_mode) /* signal_pipe is active */
+            if(num_clients>=0) /* signal_pipe is active */
                 signal_post(SIGNAL_TERMINATE);
             DestroyWindow(main_window_handle);
             break;
@@ -512,10 +563,10 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
 #endif
             break;
         case IDM_RELOAD_CONFIG:
-            if(error_mode) /* unlock daemon_thread */
-                SetEvent(config_ready);
-            else /* signal_pipe is active */
+            if(num_clients>=0) /* signal_pipe is active */
                 signal_post(SIGNAL_RELOAD_CONFIG);
+            else
+                SetEvent(config_ready); /* unlock daemon_thread() */
             break;
         case IDM_REOPEN_LOG:
             signal_post(SIGNAL_REOPEN_LOG);
@@ -535,7 +586,7 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
 #endif
             break;
         }
-        return TRUE;
+        return 0;
 
     case WM_SYSTRAY: /* a taskbar event */
         switch(lParam) {
@@ -549,8 +600,9 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
             GetCursorPos(&pt);
 #endif
             SetForegroundWindow(main_window_handle);
-            TrackPopupMenuEx(GetSubMenu(tray_menu_handle, 0), TPM_BOTTOMALIGN,
-                pt.x, pt.y, main_window_handle, NULL);
+            if(tray_menu_handle)
+                TrackPopupMenuEx(GetSubMenu(tray_menu_handle, 0),
+                    TPM_BOTTOMALIGN, pt.x, pt.y, main_window_handle, NULL);
             PostMessage(main_window_handle, WM_NULL, 0, 0);
             break;
 #ifndef _WIN32_WCE
@@ -564,19 +616,21 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
             break;
 #endif
         }
-        return TRUE;
+        return 0;
 
     case WM_VALID_CONFIG:
         valid_config();
-        return TRUE;
+        return 0;
 
     case WM_INVALID_CONFIG:
         invalid_config();
-        return TRUE;
+        return 0;
 
     case WM_LOG:
-        win_log((LPSTR)wParam);
-        return TRUE;
+        txt=(LPTSTR)wParam;
+        win_log(txt);
+        str_free(txt);
+        return 0;
 
     case WM_NEW_CHAIN:
 #ifndef _WIN32_WCE
@@ -585,11 +639,11 @@ NOEXPORT LRESULT CALLBACK window_proc(HWND main_window_handle,
 #endif
         if(tray_menu_handle)
             EnableMenuItem(tray_menu_handle, IDM_PEER_MENU+wParam, MF_ENABLED);
-        return TRUE;
+        return 0;
 
     case WM_CLIENTS:
-        update_tray_icon((int)wParam);
-        return TRUE;
+        update_tray((int)wParam);
+        return 0;
     }
 
     return DefWindowProc(main_window_handle, message, wParam, lParam);
@@ -615,25 +669,25 @@ NOEXPORT LRESULT CALLBACK about_proc(HWND dialog_handle, UINT message,
 
 NOEXPORT LRESULT CALLBACK pass_proc(HWND dialog_handle, UINT message,
         WPARAM wParam, LPARAM lParam) {
-    char *titlebar;
-    LPTSTR tstr;
+    LPTSTR titlebar;
     union {
         TCHAR txt[PEM_BUFSIZE];
         WORD len;
     } pass_dialog;
     WORD pass_len;
     char* pass_txt;
+    LPTSTR key_file_name;
 
     switch(message) {
     case WM_INITDIALOG:
         /* set the default push button to "Cancel" */
         SendMessage(dialog_handle, DM_SETDEFID, (WPARAM)IDCANCEL, (LPARAM)0);
 
-        titlebar=str_printf("Private key: %s", ui_data->section->key);
-        tstr=str2tstr(titlebar);
+        key_file_name=str2tstr(ui_data->section->key);
+        titlebar=str_tprintf(TEXT("Private key: %s"), key_file_name);
+        str_free(key_file_name);
+        SetWindowText(dialog_handle, titlebar);
         str_free(titlebar);
-        SetWindowText(dialog_handle, tstr);
-        str_free(tstr);
         return TRUE;
 
     case WM_COMMAND:
@@ -658,7 +712,7 @@ NOEXPORT LRESULT CALLBACK pass_proc(HWND dialog_handle, UINT message,
                 (WPARAM)0 /* line 0 */, (LPARAM)pass_dialog.txt);
             pass_dialog.txt[pass_len]='\0'; /* null-terminate the string */
 
-            /* convert input password to ANSI string (as ui_data->pass) */
+            /* convert input password to UTF-8 string (as ui_data->pass) */
             pass_txt=tstr2str(pass_dialog.txt);
             strcpy(ui_data->pass, pass_txt);
             str_free(pass_txt);
@@ -688,7 +742,7 @@ int passwd_cb(char *buf, int size, int rwflag, void *userdata) {
     return strlen(buf);
 }
 
-#ifdef HAVE_OSSL_ENGINE_H
+#ifndef OPENSSL_NO_ENGINE
 int pin_cb(UI *ui, UI_STRING *uis) {
     ui_data=UI_get0_user_data(ui); /* was: ui_data=UI_get_app_data(ui); */
     if(!ui_data) {
@@ -727,7 +781,7 @@ NOEXPORT void save_log() {
     if(!GetSaveFileName(&ofn))
         return;
 
-    txt=log_txt(); /* need to convert the result to plain ASCII */
+    txt=log_txt(); /* need to convert the result to UTF-8 */
     str=tstr2str(txt);
     str_free(txt);
     save_text_file(file_name, str);
@@ -741,33 +795,28 @@ NOEXPORT int save_text_file(LPTSTR file_name, char *str) {
     file_handle=CreateFile(file_name, GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if(file_handle==INVALID_HANDLE_VALUE) {
-        error_box("CreateFile");
+        error_box(TEXT("CreateFile"));
         return 1;
     }
     if(!WriteFile(file_handle, str, strlen(str), &ignore, NULL)) {
         CloseHandle(file_handle);
-        error_box("WriteFile");
+        error_box(TEXT("WriteFile"));
         return 1;
     }
     CloseHandle(file_handle);
     return 0;
 }
 
-NOEXPORT void win_log(LPSTR line) {
+NOEXPORT void win_log(LPCTSTR txt) {
     struct LIST *curr;
-    int len;
+    int txt_len;
     static int log_len=0;
-    LPTSTR txt;
 
-    txt=str2tstr(line);
-    len=_tcslen(txt);
-    /* this list is shared between threads */
-    curr=str_alloc(sizeof(struct LIST)+len*sizeof(TCHAR));
-    curr->len=len;
+    txt_len=_tcslen(txt);
+    curr=str_alloc(sizeof(struct LIST)+txt_len*sizeof(TCHAR));
+    curr->len=txt_len;
     _tcscpy(curr->txt, txt);
-    str_free(txt);
     curr->next=NULL;
-
     if(tail)
         tail->next=curr;
     tail=curr;
@@ -777,11 +826,9 @@ NOEXPORT void win_log(LPSTR line) {
     while(log_len>LOG_LINES) {
         curr=head;
         head=head->next;
-        /* this list is shared between threads */
         str_free(curr);
         log_len--;
     }
-
     new_logs=1;
 }
 
@@ -791,8 +838,6 @@ NOEXPORT void update_logs(void) {
     if(!InterlockedExchange(&new_logs, 0))
         return;
     txt=log_txt();
-    if(!txt)
-        return;
     SetWindowText(edit_handle, txt);
     str_free(txt);
     SendMessage(edit_handle, WM_VSCROLL, (WPARAM)SB_BOTTOM, (LPARAM)0);
@@ -810,12 +855,11 @@ NOEXPORT LPTSTR log_txt(void) {
         memcpy(buff+ptr, curr->txt, curr->len*sizeof(TCHAR));
         ptr+=curr->len;
         if(curr->next) {
-            buff[ptr++]='\r';
-            buff[ptr++]='\n';
+            buff[ptr++]=TEXT('\r');
+            buff[ptr++]=TEXT('\n');
         }
     }
-    buff[ptr]='\0';
-
+    buff[ptr]=TEXT('\0');
     return buff;
 }
 
@@ -824,16 +868,19 @@ NOEXPORT LPTSTR log_txt(void) {
 NOEXPORT void daemon_thread(void *arg) {
     (void)arg; /* skip warning about unused parameter */
 
-    main_initialize();
+    tls_alloc(NULL, NULL, "main"); /* new thread-local storage */
+    main_init();
+    SetEvent(main_initialized); /* unlock the GUI thread */
     /* get a valid configuration */
     while(main_configure(cmdline.config_file, NULL)) {
+        cmdline.config_file=NULL; /* don't retry commandline switches */
         unbind_ports(); /* in case initialization failed after bind_ports() */
         log_flush(LOG_MODE_ERROR); /* otherwise logs are buffered */
         PostMessage(hwnd, WM_INVALID_CONFIG, 0, 0); /* display error */
         WaitForSingleObject(config_ready, INFINITE);
         log_close(); /* prevent main_configure() from logging in error mode */
     }
-    error_mode=0; /* a valid configuration was loaded */
+    PostMessage(hwnd, WM_VALID_CONFIG, 0, 0);
 
     /* start the main loop */
     daemon_loop();
@@ -853,13 +900,14 @@ NOEXPORT void invalid_config() {
     ShowWindow(hwnd, SW_SHOWNORMAL); /* show window */
     SetForegroundWindow(hwnd); /* bring on top */
 
-    update_tray_icon(-1); /* error icon */
+    update_tray(-1); /* error icon */
+    update_peer_menu(); /* purge the list of sections */
 
-    win_log("");
+    win_log(TEXT(""));
     s_log(LOG_ERR, "Server is down");
-    message_box("Stunnel server is down due to an error.\n"
-        "You need to exit and correct the problem.\n"
-        "Click OK to see the error log window.",
+    message_box(TEXT("Stunnel server is down due to an error.\n")
+        TEXT("You need to exit and correct the problem.\n")
+        TEXT("Click OK to see the error log window."),
         MB_ICONERROR);
 }
 
@@ -869,10 +917,8 @@ NOEXPORT void valid_config() {
         TEXT(STUNNEL_PLATFORM);
     SetWindowText(hwnd, win32_name);
 
-    if(global_options.option.taskbar) /* save menu resources */
-        update_tray_icon(num_clients); /* idle icon */
-
-    update_peer_menu();
+    update_tray(num_clients); /* idle or busy icon (on reload) */
+    update_peer_menu(); /* one menu item per section */
 
     /* enable IDM_REOPEN_LOG menu if a log file is used, disable otherwise */
 #ifndef _WIN32_WCE
@@ -890,9 +936,8 @@ NOEXPORT void update_peer_menu(void) {
     HMENU main_peer_list=NULL;
 #endif
     HMENU tray_peer_list=NULL;
-    char *str;
-    unsigned int section_number;
-    MENUITEMINFO mii;
+    unsigned section_number;
+    LPTSTR servname;
 
     /* purge menu peer lists */
 #ifndef _WIN32_WCE
@@ -915,45 +960,40 @@ NOEXPORT void update_peer_menu(void) {
 
     section_number=0;
     for(section=service_options.next; section; section=section->next) {
-        /* setup section->file */
-        str=str_printf("peer-%s.pem", section->servname);
-        section->file=str2tstr(str);
-        str_free(str);
+        servname=str2tstr(section->servname);
 
         /* setup LPTSTR section->file */
-        str=str_printf("peer-%s.pem", section->servname);
-        section->file=str2tstr(str);
-        str_free(str);
+        section->file=str_tprintf(TEXT("peer-%s.pem"), servname);
 
-        /* setup (char *) section->help */
-        section->help=str_printf(
-            "Peer certificate chain has been saved.\n"
-            "Add the following lines to section [%s]:\n"
-            "\tCAfile = peer-%s.pem\n"
-            "\tverify = 3\n"
-            "to enable cryptographic authentication.\n"
-            "Then reload stunnel configuration file.",
-            section->servname, section->servname);
+        /* setup section->help */
+        section->help=str_tprintf(
+            TEXT("Peer certificate chain has been saved.\n")
+            TEXT("Add the following lines to section [%s]:\n")
+            TEXT("\tCAfile = peer-%s.pem\n")
+            TEXT("\tverify = 3\n")
+            TEXT("to enable cryptographic authentication.\n")
+            TEXT("Then reload stunnel configuration file."),
+            servname, servname);
+
+        str_free(servname);
 
         /* setup section->chain */
         section->chain=NULL;
 
         /* insert new menu item */
-        mii.cbSize=sizeof mii;
-        mii.fMask=MIIM_STRING|MIIM_DATA|MIIM_ID|MIIM_STATE;
-        mii.fType=MFT_STRING;
-        mii.dwTypeData=section->file;
-        mii.cch=_tcslen(mii.dwTypeData);
-        mii.wID=IDM_PEER_MENU+section_number;
-        mii.fState=MFS_GRAYED;
 #ifndef _WIN32_WCE
         if(main_peer_list)
-            if(!InsertMenuItem(main_peer_list, section_number, TRUE, &mii))
-                ioerror("InsertMenuItem");
+            if(!InsertMenu(main_peer_list, section_number,
+                    MF_BYPOSITION|MF_STRING|MF_GRAYED,
+                    IDM_PEER_MENU+section_number, section->file))
+                ioerror("InsertMenu");
 #endif
         if(tray_peer_list)
-            if(!InsertMenuItem(tray_peer_list, section_number, TRUE, &mii))
-                ioerror("InsertMenuItem");
+            if(!InsertMenu(tray_peer_list, section_number,
+                    MF_BYPOSITION|MF_STRING|MF_GRAYED,
+                    IDM_PEER_MENU+section_number, section->file))
+                ioerror("InsertMenu");
+
         ++section_number;
     }
     if(hwnd)
@@ -961,23 +1001,25 @@ NOEXPORT void update_peer_menu(void) {
 }
 
 ICON_IMAGE load_icon_default(ICON_TYPE type) {
-    WORD icon;
+    WORD idi;
+    ICON_IMAGE img;
 
     switch(type) {
     case ICON_ACTIVE:
-        icon=IDI_STUNNEL_ACTIVE;
+        idi=IDI_STUNNEL_ACTIVE;
         break;
     case ICON_ERROR:
-        icon=IDI_STUNNEL_ERROR;
+        idi=IDI_STUNNEL_ERROR;
         break;
     case ICON_IDLE:
-        icon=IDI_STUNNEL_IDLE;
+        idi=IDI_STUNNEL_IDLE;
         break;
     default:
         return NULL;
     }
-    return LoadImage(ghInst, MAKEINTRESOURCE(icon), IMAGE_ICON,
+    img=LoadImage(ghInst, MAKEINTRESOURCE(idi), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    return DuplicateIcon(NULL, img);
 }
 
 ICON_IMAGE load_icon_file(const char *name) {
@@ -985,21 +1027,37 @@ ICON_IMAGE load_icon_file(const char *name) {
     ICON_IMAGE icon;
 
     tname=str2tstr((LPSTR)name);
+#ifndef _WIN32_WCE
     icon=LoadImage(NULL, tname, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
         GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE);
+#else
+    /* TODO: Implement a WCE version of LoadImage() */
+    /* icon=wceLoadIconFromFile(tname); */
+    s_log(LOG_ERR, "Loading image from file not implemented on WCE");
+    icon=NULL;
+#endif
     str_free(tname);
     return icon;
 }
 
-NOEXPORT void update_tray_icon(const int num) {
+NOEXPORT void update_tray(const int num) {
     NOTIFYICONDATA nid;
     static ICON_TYPE previous_icon=ICON_NONE;
     ICON_TYPE current_icon;
+    LPTSTR tip;
 
-    if(!tray_menu_handle) { /* initialize taskbar */
-        tray_menu_handle=LoadMenu(ghInst, MAKEINTRESOURCE(IDM_TRAYMENU));
-        SetTimer(hwnd, 0x29a, 1000, NULL); /* 1-second timer */
+    if(!global_options.option.taskbar) {
+        /* release previously allocated menu resources */
+        if(tray_menu_handle) { /* disabled in the new configuration */
+            DestroyMenu(tray_menu_handle);
+            tray_menu_handle=NULL;
+        }
+        return;
     }
+    if(!tray_menu_handle) /* initialize taskbar */
+        tray_menu_handle=LoadMenu(ghInst, MAKEINTRESOURCE(IDM_TRAYMENU));
+    if(tray_menu_handle && cmdline.service)
+        EnableMenuItem(tray_menu_handle, IDM_EDIT_CONFIG, MF_GRAYED);
 
     ZeroMemory(&nid, sizeof nid);
     nid.cbSize=sizeof nid;
@@ -1008,15 +1066,18 @@ NOEXPORT void update_tray_icon(const int num) {
     nid.uCallbackMessage=WM_SYSTRAY; /* notification message */
     nid.hWnd=hwnd; /* window to receive notifications */
     if(num<0) {
-        _stprintf(nid.szTip, TEXT("Server is down"));
+        tip=str_tprintf(TEXT("Server is down"));
         current_icon=ICON_ERROR;
     } else if(num>0) {
-        _stprintf(nid.szTip, TEXT("%d active session(s)"), num);
+        tip=str_tprintf(TEXT("%d active session(s)"), num);
         current_icon=ICON_ACTIVE;
     } else {
-        _stprintf(nid.szTip, TEXT("Server is idle"));
+        tip=str_tprintf(TEXT("Server is idle"));
         current_icon=ICON_IDLE;
     }
+    _tcsncpy(nid.szTip, tip, 63);
+    nid.szTip[63]=TEXT('\0');
+    str_free(tip);
     nid.hIcon=global_options.icon[current_icon];
     if(current_icon!=previous_icon) {
         nid.uFlags|=NIF_ICON;
@@ -1029,31 +1090,24 @@ NOEXPORT void update_tray_icon(const int num) {
     Shell_NotifyIcon(NIM_ADD, &nid);
 }
 
-NOEXPORT void error_box(const LPSTR text) {
-    char *errmsg, *fullmsg;
-    LPTSTR tstr;
+NOEXPORT void error_box(LPCTSTR text) {
+    LPTSTR errmsg, fullmsg;
     long dw;
 
     dw=GetLastError();
     FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM,
         NULL, dw, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR)&tstr, 0, NULL);
-    errmsg=tstr2str(tstr);
-    LocalFree(tstr);
-    fullmsg=str_printf("%s: error %ld: %s", text, dw, errmsg);
-    str_free(errmsg);
+        (LPTSTR)&errmsg, 0, NULL);
+    fullmsg=str_tprintf(TEXT("%s: error %ld: %s"), text, dw, errmsg);
+    LocalFree(errmsg);
     message_box(fullmsg, MB_ICONERROR);
     str_free(fullmsg);
 }
 
-void message_box(const LPSTR text, const UINT type) {
-    LPTSTR tstr;
-
+void message_box(LPCTSTR text, const UINT type) {
     if(cmdline.quiet)
         return;
-    tstr=str2tstr(text);
-    MessageBox(hwnd, tstr, win32_name, type);
-    str_free(tstr);
+    MessageBox(hwnd, text, win32_name, type);
 }
 
 void ui_new_chain(const int section_number) {
@@ -1061,40 +1115,51 @@ void ui_new_chain(const int section_number) {
 }
 
 void ui_new_log(const char *line) {
-    SendMessage(hwnd, WM_LOG, (WPARAM)line, 0);
+    LPTSTR txt;
+    txt=str2tstr(line);
+    str_detach(txt); /* this allocation will be freed in the GUI thread */
+    PostMessage(hwnd, WM_LOG, (WPARAM)txt, 0);
 }
 
-void ui_new_config(void) {
+void ui_config_reloaded(void) {
     PostMessage(hwnd, WM_VALID_CONFIG, 0, 0);
 }
 
-void ui_clients(const int num) {
+void ui_clients(const long num) {
     PostMessage(hwnd, WM_CLIENTS, (WPARAM)num, 0);
 }
 
-NOEXPORT void edit_config(HWND main_window_handle) {
-    char cwd[MAX_PATH], *conf_path;
-
     /* TODO: port it to WCE */
+NOEXPORT void edit_config(HWND main_window_handle) {
+    TCHAR cwd[MAX_PATH];
+    LPTSTR conf_file, conf_path;
+
+    conf_file=str2tstr(configuration_file);
+    if(*conf_file==TEXT('\"')) {
+        conf_path=conf_file;
+    } else if(_tcschr(conf_file, TEXT('\\'))) {
+        conf_path=str_tprintf(TEXT("\"%s\""), conf_file);
+        str_free(conf_file);
+    } else {
+        GetCurrentDirectory(MAX_PATH, cwd);
+        conf_path=str_tprintf(TEXT("\"%s\\%s\""), cwd, conf_file);
+        str_free(conf_file);
+    }
+
     if(is_admin()) {
         ShellExecute(main_window_handle, TEXT("open"),
-            TEXT("notepad.exe"), configuration_file,
+            TEXT("notepad.exe"), conf_path,
             NULL, SW_SHOWNORMAL);
     } else { /* UAC workaround */
-        if(strchr(configuration_file, '\\')) {
-            conf_path=strdup(configuration_file);
-        } else {
-            GetCurrentDirectory(MAX_PATH, cwd);
-            conf_path=str_printf("%s\\%s", cwd, configuration_file);
-        }
         ShellExecute(main_window_handle, TEXT("runas"),
             TEXT("notepad.exe"), conf_path,
             NULL, SW_SHOWNORMAL);
-        str_free(conf_path);
     }
+    str_free(conf_path);
 }
 
 NOEXPORT BOOL is_admin(void) {
+#ifndef _WIN32_WCE
     SID_IDENTIFIER_AUTHORITY NtAuthority={SECURITY_NT_AUTHORITY};
     PSID admin_group;
     BOOL retval;
@@ -1108,6 +1173,9 @@ NOEXPORT BOOL is_admin(void) {
         FreeSid(admin_group);
     }
     return retval;
+#else
+    return TRUE; /* always an admin on WCE */
+#endif
 }
 
 /**************************************** windows service */
@@ -1119,36 +1187,49 @@ NOEXPORT int service_initialize(void) {
 
     serviceTable[0].lpServiceName=SERVICE_NAME;
     serviceTable[0].lpServiceProc=service_main;
-    global_options.option.taskbar=0; /* disable taskbar for security */
+    /* disable taskbar for security */
+    /* global_options.option.taskbar=0; */
     if(!StartServiceCtrlDispatcher(serviceTable)) {
-        error_box("StartServiceCtrlDispatcher");
+        error_box(TEXT("StartServiceCtrlDispatcher"));
         return 1;
     }
     return 0; /* NT service started */
 }
 
-NOEXPORT int service_install(LPSTR command_line) {
+#define DESCR_LEN 256
+
+NOEXPORT int service_install() {
     SC_HANDLE scm, service;
-    char stunnel_exe_path[MAX_PATH], *service_path;
+    TCHAR stunnel_exe_path[MAX_PATH];
+    LPTSTR service_path;
+    TCHAR descr_str[DESCR_LEN];
+    SERVICE_DESCRIPTION descr;
 
     scm=OpenSCManager(0, 0, SC_MANAGER_CREATE_SERVICE);
     if(!scm) {
-        error_box("OpenSCManager");
+        error_box(TEXT("OpenSCManager"));
         return 1;
     }
     GetModuleFileName(0, stunnel_exe_path, MAX_PATH);
-    service_path=str_printf("\"%s\" -service %s", stunnel_exe_path, command_line);
-    service=CreateService(scm, SERVICE_NAME, SERVICE_NAME, SERVICE_ALL_ACCESS,
+    service_path=str_tprintf(TEXT("\"%s\" -service %s"),
+        stunnel_exe_path, get_params());
+    service=CreateService(scm, SERVICE_NAME, SERVICE_DISPLAY_NAME,
+        SERVICE_ALL_ACCESS,
         SERVICE_WIN32_OWN_PROCESS|SERVICE_INTERACTIVE_PROCESS,
         SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, service_path,
-        NULL, NULL, NULL, NULL, NULL);
-    str_free(service_path);
+        NULL, NULL, TEXT("TCPIP\0"), NULL, NULL);
     if(!service) {
-        error_box("CreateService");
+        error_box(TEXT("CreateService"));
+        str_free(service_path);
         CloseServiceHandle(scm);
         return 1;
     }
-    message_box("Service installed", MB_ICONINFORMATION);
+    str_free(service_path);
+    if(LoadString(ghInst, IDS_SERVICE_DESC, descr_str, DESCR_LEN)) {
+        descr.lpDescription=descr_str;
+        ChangeServiceConfig2(service, SERVICE_CONFIG_DESCRIPTION, &descr);
+    }
+    message_box(TEXT("Service installed"), MB_ICONINFORMATION);
     CloseServiceHandle(service);
     CloseServiceHandle(scm);
     return 0;
@@ -1160,34 +1241,34 @@ NOEXPORT int service_uninstall(void) {
 
     scm=OpenSCManager(0, 0, SC_MANAGER_CONNECT);
     if(!scm) {
-        error_box("OpenSCManager");
+        error_box(TEXT("OpenSCManager"));
         return 1;
     }
     service=OpenService(scm, SERVICE_NAME, SERVICE_QUERY_STATUS|DELETE);
     if(!service) {
-        error_box("OpenService");
+        error_box(TEXT("OpenService"));
         CloseServiceHandle(scm);
         return 1;
     }
     if(!QueryServiceStatus(service, &serviceStatus)) {
-        error_box("QueryServiceStatus");
+        error_box(TEXT("QueryServiceStatus"));
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
     }
     if(serviceStatus.dwCurrentState!=SERVICE_STOPPED) {
-        message_box("The service is still running", MB_ICONERROR);
+        message_box(TEXT("The service is still running"), MB_ICONERROR);
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
     }
     if(!DeleteService(service)) {
-        error_box("DeleteService");
+        error_box(TEXT("DeleteService"));
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
     }
-    message_box("Service uninstalled", MB_ICONINFORMATION);
+    message_box(TEXT("Service uninstalled"), MB_ICONINFORMATION);
     CloseServiceHandle(service);
     CloseServiceHandle(scm);
     return 0;
@@ -1199,17 +1280,17 @@ NOEXPORT int service_start(void) {
 
     scm=OpenSCManager(0, 0, SC_MANAGER_CONNECT);
     if(!scm) {
-        error_box("OpenSCManager");
+        error_box(TEXT("OpenSCManager"));
         return 1;
     }
     service=OpenService(scm, SERVICE_NAME, SERVICE_QUERY_STATUS|SERVICE_START);
     if(!service) {
-        error_box("OpenService");
+        error_box(TEXT("OpenService"));
         CloseServiceHandle(scm);
         return 1;
     }
     if(!StartService(service, 0, NULL)) {
-        error_box("StartService");
+        error_box(TEXT("StartService"));
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
@@ -1217,19 +1298,19 @@ NOEXPORT int service_start(void) {
     do {
         Sleep(1000);
         if(!QueryServiceStatus(service, &serviceStatus)) {
-            error_box("QueryServiceStatus");
+            error_box(TEXT("QueryServiceStatus"));
             CloseServiceHandle(service);
             CloseServiceHandle(scm);
             return 1;
         }
     } while(serviceStatus.dwCurrentState==SERVICE_START_PENDING);
     if(serviceStatus.dwCurrentState!=SERVICE_RUNNING) {
-        message_box("Failed to start service", MB_ICONERROR);
+        message_box(TEXT("Failed to start service"), MB_ICONERROR);
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
     }
-    message_box("Service started", MB_ICONINFORMATION);
+    message_box(TEXT("Service started"), MB_ICONINFORMATION);
     CloseServiceHandle(service);
     CloseServiceHandle(scm);
     return 0;
@@ -1241,29 +1322,29 @@ NOEXPORT int service_stop(void) {
 
     scm=OpenSCManager(0, 0, SC_MANAGER_CONNECT);
     if(!scm) {
-        error_box("OpenSCManager");
+        error_box(TEXT("OpenSCManager"));
         return 1;
     }
     service=OpenService(scm, SERVICE_NAME, SERVICE_QUERY_STATUS|SERVICE_STOP);
     if(!service) {
-        error_box("OpenService");
+        error_box(TEXT("OpenService"));
         CloseServiceHandle(scm);
         return 1;
     }
     if(!QueryServiceStatus(service, &serviceStatus)) {
-        error_box("QueryServiceStatus");
+        error_box(TEXT("QueryServiceStatus"));
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
     }
     if(serviceStatus.dwCurrentState==SERVICE_STOPPED) {
-        message_box("The service is already stopped", MB_ICONERROR);
+        message_box(TEXT("The service is already stopped"), MB_ICONERROR);
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
     }
     if(!ControlService(service, SERVICE_CONTROL_STOP, &serviceStatus)) {
-        error_box("ControlService");
+        error_box(TEXT("ControlService"));
         CloseServiceHandle(service);
         CloseServiceHandle(scm);
         return 1;
@@ -1271,13 +1352,13 @@ NOEXPORT int service_stop(void) {
     do {
         Sleep(1000);
         if(!QueryServiceStatus(service, &serviceStatus)) {
-            error_box("QueryServiceStatus");
+            error_box(TEXT("QueryServiceStatus"));
             CloseServiceHandle(service);
             CloseServiceHandle(scm);
             return 1;
         }
     } while(serviceStatus.dwCurrentState!=SERVICE_STOPPED);
-    message_box("Service stopped", MB_ICONINFORMATION);
+    message_box(TEXT("Service stopped"), MB_ICONINFORMATION);
     CloseServiceHandle(service);
     CloseServiceHandle(scm);
     return 0;
@@ -1286,6 +1367,8 @@ NOEXPORT int service_stop(void) {
 NOEXPORT void WINAPI service_main(DWORD argc, LPTSTR* argv) {
     (void)argc; /* skip warning about unused parameter */
     (void)argv; /* skip warning about unused parameter */
+
+    tls_alloc(NULL, NULL, "service"); /* new thread-local storage */
 
     /* initialise service status */
     serviceStatus.dwServiceType=SERVICE_WIN32;
@@ -1353,5 +1436,28 @@ NOEXPORT void WINAPI control_handler(DWORD controlCode) {
 }
 
 #endif /* !defined(_WIN32_WCE) */
+
+/**************************************** other functions */
+
+NOEXPORT LPTSTR get_params() {
+    LPTSTR c;
+    TCHAR s;
+
+    c=GetCommandLine();
+    if(*c==TEXT('\"')) {
+        s=TEXT('\"');
+        ++c;
+    } else {
+        s=TEXT(' ');
+    }
+    for(; *c; ++c)
+        if(*c==s) {
+            ++c;
+            break;
+        }
+    while(*c==TEXT(' '))
+        ++c;
+    return c;
+}
 
 /* end of ui_win_gui.c */

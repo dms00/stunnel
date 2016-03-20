@@ -1,6 +1,6 @@
 /*
  *   stunnel       Universal SSL tunnel
- *   Copyright (C) 1998-2014 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) { /* execution begins here 8-) */
 #ifdef M_MMAP_THRESHOLD
     mallopt(M_MMAP_THRESHOLD, 4096);
 #endif
-    str_init(); /* initialize per-thread string management */
+    tls_init(); /* initialize thread-local storage */
     retval=main_unix(argc, argv);
     main_cleanup();
     return retval;
@@ -68,7 +68,7 @@ NOEXPORT int main_unix(int argc, char* argv[]) {
     if(fd<0)
         fatal("Could not open /dev/null");
 #endif
-    main_initialize();
+    main_init();
     if(main_configure(argc>1 ? argv[1] : NULL, argc>2 ? argv[2] : NULL)) {
         close(fd);
         return 1;
@@ -108,6 +108,8 @@ NOEXPORT int main_unix(int argc, char* argv[]) {
         signal(SIGCHLD, SIG_IGN); /* ignore dead children */
         signal(SIGPIPE, SIG_IGN); /* ignore broken pipe */
 #endif
+        set_nonblock(0, 1); /* stdin */
+        set_nonblock(1, 1); /* stdout */
         client_main(alloc_client_session(&service_options, 0, 1));
     }
     return 0;
@@ -151,6 +153,7 @@ NOEXPORT int daemonize(int fd) { /* go to background */
         exit(0);
     }
 #endif
+    tls_alloc(NULL, ui_tls, "main"); /* reuse thread-local storage */
 #ifdef HAVE_SETSID
     setsid(); /* ignore the error */
 #endif
@@ -181,7 +184,11 @@ NOEXPORT int create_pid(void) {
         return 1;
     }
     pid=str_printf("%lu\n", global_options.dpid);
-    write(pf, pid, strlen(pid));
+    if(write(pf, pid, strlen(pid))<(int)strlen(pid)) {
+        s_log(LOG_ERR, "Cannot write pid file %s", global_options.pidfile);
+        ioerror("write");
+        return 1;
+    }
     str_free(pid);
     close(pf);
     s_log(LOG_DEBUG, "Created pid file %s", global_options.pidfile);
@@ -201,9 +208,23 @@ NOEXPORT void delete_pid(void) {
 
 /**************************************** options callbacks */
 
-void ui_new_config(void) {
+void ui_config_reloaded(void) {
     /* no action */
 }
+
+#ifdef ICON_IMAGE
+
+ICON_IMAGE load_icon_default(ICON_TYPE icon) {
+    (void)icon; /* skip warning about unused parameter */
+    return (ICON_IMAGE)0;
+}
+
+ICON_IMAGE load_icon_file(const char *file) {
+    (void)file; /* skip warning about unused parameter */
+    return (ICON_IMAGE)0;
+}
+
+#endif
 
 /**************************************** client callbacks */
 
@@ -211,7 +232,7 @@ void ui_new_chain(const int section_number) {
     (void)section_number; /* skip warning about unused parameter */
 }
 
-void ui_clients(const int num) {
+void ui_clients(const long num) {
     (void)num; /* skip warning about unused parameter */
 }
 
@@ -231,7 +252,7 @@ int passwd_cb(char *buf, int size, int rwflag, void *userdata) {
     return 0; /* not implemented */
 }
 
-#ifdef HAVE_OSSL_ENGINE_H
+#ifndef OPENSSL_NO_ENGINE
 int pin_cb(UI *ui, UI_STRING *uis) {
     (void)ui; /* skip warning about unused parameter */
     (void)uis; /* skip warning about unused parameter */
