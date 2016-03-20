@@ -1,3 +1,3 @@
-# stunnel v3.00
+# stunnel v3.22
 
-Download from ftp://ftp.stunnel.org/stunnel/archive/3.x/stunnel-3.00.tar.gz
+Download from ftp://ftp.stunnel.org/stunnel/archive/3.x/stunnel-3.22.tar.gz

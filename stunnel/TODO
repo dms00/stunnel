@@ -1,8 +1,12 @@
 stunnel         Universal SSL tunnel
 
-- Write FAQ, update manual, etc.
+* Use poll(2) instead of socket(2) where possibe.
 
-- Make port to WIN32 as a native application (no cygwin library).
+* New user interface with configuration file and long options (--option).
 
-- Test RSAREF support.
+* Log to file on Win32, log to EventLog on NT.
+
+* CRL support.
+
+* Win32 GUI. 8-)
 
