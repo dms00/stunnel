@@ -1,8 +1,5 @@
-stunnel         Universal SSL tunnel
+stunnel known bugs
 
-KNOWN BUGS
 
-- Shared library to be LD_PRELOADed with `transparent' option
-  is not too portable.  stunnel should support creating shared
-  libraries on non-gcc compilers.
+- Shared library for transparent proxy does not support IPv6.
 
