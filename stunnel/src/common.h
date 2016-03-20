@@ -1,24 +1,24 @@
 /*
  *   stunnel       TLS offloading and load-balancing proxy
- *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2016 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
  *   Free Software Foundation; either version 2 of the License, or (at your
  *   option) any later version.
- * 
+ *
  *   This program is distributed in the hope that it will be useful,
  *   but WITHOUT ANY WARRANTY; without even the implied warranty of
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  *   See the GNU General Public License for more details.
- * 
+ *
  *   You should have received a copy of the GNU General Public License along
  *   with this program; if not, see <http://www.gnu.org/licenses>.
- * 
+ *
  *   Linking stunnel statically or dynamically with other modules is making
  *   a combined work based on stunnel. Thus, the terms and conditions of
  *   the GNU General Public License cover the whole combination.
- * 
+ *
  *   In addition, as a special exception, the copyright holder of stunnel
  *   gives you permission to combine stunnel with free software programs or
  *   libraries that are released under the GNU LGPL and with code included
@@ -26,7 +26,7 @@
  *   modified versions of such code, with unchanged license). You may copy
  *   and distribute such a system following the terms of the GNU GPL for
  *   stunnel and the licenses of the other code concerned.
- * 
+ *
  *   Note that people who make modified versions of stunnel are not obligated
  *   to grant this special exception for their modified versions; it is their
  *   choice whether to do so. The GNU General Public License gives permission
@@ -90,16 +90,15 @@ typedef unsigned long long  uint64_t;
 #ifndef __MINGW32__
 #ifdef  _WIN64
 typedef __int64             ssize_t;
-#else
+#else /* _WIN64 */
 typedef int                 ssize_t;
-#endif
-#endif
+#endif /* _WIN64 */
+#endif /* !__MINGW32__ */
+#define PATH_MAX MAX_PATH
 #define USE_IPv6
 #define _CRT_SECURE_NO_DEPRECATE
 #define _CRT_NONSTDC_NO_DEPRECATE
 #define _CRT_NON_CONFORMING_SWPRINTFS
-#define HAVE_OSSL_ENGINE_H
-#define HAVE_OSSL_OCSP_H
 /* prevent including wincrypt.h, as it defines its own OCSP_RESPONSE */
 #define __WINCRYPT_H__
 #define S_EADDRINUSE  WSAEADDRINUSE
@@ -291,6 +290,9 @@ typedef int SOCKET;
     /* Unix-specific headers */
 #include <signal.h>         /* signal */
 #include <sys/wait.h>       /* wait */
+#ifdef HAVE_LIMITS_H
+#include <limits.h>         /* INT_MAX */
+#endif
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>   /* getrlimit */
 #endif
@@ -306,6 +308,7 @@ typedef int SOCKET;
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>     /* for aix */
 #endif
+#include <dirent.h>
 
 #if defined(HAVE_POLL) && !defined(BROKEN_POLL)
 #ifdef HAVE_POLL_H
@@ -334,6 +337,7 @@ typedef int SOCKET;
 #include <sys/uio.h>    /* struct iovec */
 #endif /* HAVE_SYS_UIO_H */
 
+/* BSD sockets */
 #include <netinet/in.h>  /* struct sockaddr_in */
 #include <sys/socket.h>  /* getpeername */
 #include <arpa/inet.h>   /* inet_ntoa */
@@ -394,8 +398,15 @@ extern char *sys_errlist[];
 #ifdef HAVE_SYS_SYSCALL_H
 #include <sys/syscall.h> /* SYS_gettid */
 #endif
+#ifdef HAVE_LINUX_SCHED_H
+#include <linux/sched.h> /* SCHED_BATCH */
+#endif
 
 #endif /* USE_WIN32 */
+
+#ifndef S_ISREG
+#define S_ISREG(m) (((m)&S_IFMT)==S_IFREG)
+#endif
 
 /**************************************** OpenSSL headers */
 
@@ -440,20 +451,13 @@ extern char *sys_errlist[];
 #endif /* !defined(OPENSSL_NO_SSL2) */
 #endif /* OpenSSL 1.1.0 or newer */
 
-#if !defined(HAVE_OSSL_ENGINE_H) && !defined(OPENSSL_NO_ENGINE)
-#define OPENSSL_NO_ENGINE
-#endif /* !defined(HAVE_OSSL_ENGINE_H) && !defined(OPENSSL_NO_ENGINE) */
-
-#if !defined(HAVE_OSSL_OCSP_H) && !defined(OPENSSL_NO_OCSP)
-#define OPENSSL_NO_OCSP
-#endif /* !defined(HAVE_OSSL_OCSP_H) && !defined(OPENSSL_NO_OCSP) */
-
 #if defined(USE_WIN32) && defined(OPENSSL_FIPS)
 #define USE_FIPS
 #endif
 
 #include <openssl/lhash.h>
 #include <openssl/ssl.h>
+#include <openssl/ssl23.h>
 #include <openssl/ui.h>
 #include <openssl/err.h>
 #include <openssl/crypto.h> /* for CRYPTO_* and SSLeay_version */
@@ -476,6 +480,12 @@ extern char *sys_errlist[];
 /* not defined in public headers before OpenSSL 0.9.8 */
 STACK_OF(SSL_COMP) *SSL_COMP_get_compression_methods(void);
 #endif /* !defined(OPENSSL_NO_COMP) */
+
+#ifndef OPENSSL_VERSION
+#define OPENSSL_VERSION SSLEAY_VERSION
+#define OpenSSL_version_num() SSLeay()
+#define OpenSSL_version(x) SSLeay_version(x)
+#endif
 
 /**************************************** other defines */
 

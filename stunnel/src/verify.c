@@ -1,6 +1,6 @@
 /*
  *   stunnel       TLS offloading and load-balancing proxy
- *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2016 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -41,6 +41,9 @@
 /**************************************** prototypes */
 
 /* verify initialization */
+NOEXPORT void set_client_CA_list(SERVICE_OPTIONS *section);
+NOEXPORT void auth_warnings(SERVICE_OPTIONS *);
+NOEXPORT int crl_init(SERVICE_OPTIONS *section);
 NOEXPORT int load_file_lookup(X509_STORE *, char *);
 NOEXPORT int add_dir_lookup(X509_STORE *, char *);
 
@@ -53,7 +56,6 @@ NOEXPORT int cert_check_subject(CLI *, X509_STORE_CTX *);
 #endif /* OPENSSL_VERSION_NUMBER>=0x10002000L */
 NOEXPORT int cert_check_local(X509_STORE_CTX *);
 NOEXPORT int compare_pubkeys(X509 *, X509 *);
-NOEXPORT int crl_check(CLI *, X509_STORE_CTX *);
 #ifndef OPENSSL_NO_OCSP
 NOEXPORT int ocsp_check(CLI *, X509_STORE_CTX *);
 NOEXPORT int ocsp_request(CLI *, X509_STORE_CTX *, OCSP_CERTID *, char *);
@@ -63,78 +65,65 @@ NOEXPORT OCSP_RESPONSE *ocsp_get_response(CLI *, OCSP_REQUEST *, char *);
 /* utility functions */
 #ifndef OPENSSL_NO_OCSP
 NOEXPORT X509 *get_current_issuer(X509_STORE_CTX *);
-#endif
 NOEXPORT void log_time(const int, const char *, ASN1_TIME *);
+#endif
 
 /**************************************** verify initialization */
 
 int verify_init(SERVICE_OPTIONS *section) {
-    STACK_OF(X509_NAME) *ca_dn;
-    char *ca_name;
-    int i, verify_mode=SSL_VERIFY_PEER;
+    int verify_mode=0;
 
-    if(section->verify_level<0)
-        return 0; /* OK - no certificate verification */
-
-    section->revocation_store=X509_STORE_new();
-    if(!section->revocation_store) {
-        sslerror("X509_STORE_new");
-        return 1; /* FAILED */
-    }
-
-    if(section->ca_file) {
+    /* CA initialization */
+    if(section->ca_file || section->ca_dir) {
         if(!SSL_CTX_load_verify_locations(section->ctx,
-                section->ca_file, NULL)) {
-            s_log(LOG_ERR, "Error loading verify certificates from %s",
-                section->ca_file);
+                section->ca_file, section->ca_dir)) {
             sslerror("SSL_CTX_load_verify_locations");
             return 1; /* FAILED */
         }
-        /* revocation store needs CA certificates for CRL validation */
-        if(load_file_lookup(section->revocation_store, section->ca_file))
-            return 1; /* FAILED */
-        /* trusted CA names sent to clients for client cert selection */
-        if(!section->option.client) { /* only performed on server */
-            s_log(LOG_DEBUG, "Client CA list: %s",
-                section->ca_file);
-            ca_dn=SSL_load_client_CA_file(section->ca_file);
-            for (i=0; i<sk_X509_NAME_num(ca_dn); ++i) {
-                ca_name=X509_NAME2text(sk_X509_NAME_value(ca_dn, i));
-                s_log(LOG_INFO, "Client CA: %s", ca_name);
-                str_free(ca_name);
-            }
-            SSL_CTX_set_client_CA_list(section->ctx, ca_dn);
-        }
     }
+    if(section->ca_file && !section->option.client)
+        set_client_CA_list(section); /* only performed on the server */
 
-    if(section->ca_dir) {
-        if(!SSL_CTX_load_verify_locations(section->ctx,
-                NULL, section->ca_dir)) {
-            s_log(LOG_ERR, "Error setting verify directory to %s",
-                section->ca_dir);
-            sslerror("SSL_CTX_load_verify_locations");
-            return 1; /* FAILED */
-        }
-        s_log(LOG_DEBUG, "Verify directory set to %s", section->ca_dir);
-        /* revocation store needs CA certificates for CRL validation */
-        add_dir_lookup(section->revocation_store, section->ca_dir);
-    }
-
-    if(section->crl_file)
-        if(load_file_lookup(section->revocation_store, section->crl_file))
+    /* CRL initialization */
+    if(section->crl_file || section->crl_dir)
+        if(crl_init(section))
             return 1; /* FAILED */
 
-    if(section->crl_dir) {
-        section->revocation_store->cache=0; /* don't cache CRLs */
-        add_dir_lookup(section->revocation_store, section->crl_dir);
-    }
-
+    /* verify callback setup */
+    if(section->verify_level>=0)
+        verify_mode|=SSL_VERIFY_PEER;
     if(section->verify_level>=2 && !section->redirect_addr.names)
         verify_mode|=SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
     SSL_CTX_set_verify(section->ctx, verify_mode, verify_callback);
+    auth_warnings(section);
 
-    if(section->ca_dir && section->verify_level>=3)
-        s_log(LOG_INFO, "Peer certificate location %s", section->ca_dir);
+    return 0; /* OK */
+}
+
+/* trusted CA names sent to clients for client cert selection */
+NOEXPORT void set_client_CA_list(SERVICE_OPTIONS *section) {
+    STACK_OF(X509_NAME) *ca_dn;
+
+    s_log(LOG_DEBUG, "Client CA list: %s", section->ca_file);
+    ca_dn=SSL_load_client_CA_file(section->ca_file);
+    SSL_CTX_set_client_CA_list(section->ctx, ca_dn);
+    print_client_CA_list(ca_dn);
+}
+
+NOEXPORT int crl_init(SERVICE_OPTIONS *section) {
+    X509_STORE *store;
+
+    store=SSL_CTX_get_cert_store(section->ctx);
+    if(section->crl_file) {
+        if(load_file_lookup(store, section->crl_file))
+            return 1; /* FAILED */
+    }
+    if(section->crl_dir) {
+        store->cache=0; /* don't cache CRLs */
+        if(add_dir_lookup(store, section->crl_dir))
+            return 1; /* FAILED */
+    }
+    X509_STORE_set_flags(store, X509_V_FLAG_CRL_CHECK);
     return 0; /* OK */
 }
 
@@ -143,12 +132,12 @@ NOEXPORT int load_file_lookup(X509_STORE *store, char *name) {
 
     lookup=X509_STORE_add_lookup(store, X509_LOOKUP_file());
     if(!lookup) {
-        sslerror("X509_STORE_add_lookup");
+        sslerror("X509_STORE_add_lookup(X509_LOOKUP_file)");
         return 1; /* FAILED */
     }
-    if(!X509_LOOKUP_load_file(lookup, name, X509_FILETYPE_PEM)) {
+    if(!X509_load_crl_file(lookup, name, X509_FILETYPE_PEM)) {
         s_log(LOG_ERR, "Failed to load %s revocation lookup file", name);
-        sslerror("X509_LOOKUP_load_file");
+        sslerror("X509_load_crl_file");
         return 1; /* FAILED */
     }
     s_log(LOG_DEBUG, "Loaded %s revocation lookup file", name);
@@ -160,7 +149,7 @@ NOEXPORT int add_dir_lookup(X509_STORE *store, char *name) {
 
     lookup=X509_STORE_add_lookup(store, X509_LOOKUP_hash_dir());
     if(!lookup) {
-        sslerror("X509_STORE_add_lookup");
+        sslerror("X509_STORE_add_lookup(X509_LOOKUP_hash_dir)");
         return 1; /* FAILED */
     }
     if(!X509_LOOKUP_add_dir(lookup, name, X509_FILETYPE_PEM)) {
@@ -170,6 +159,39 @@ NOEXPORT int add_dir_lookup(X509_STORE *store, char *name) {
     }
     s_log(LOG_DEBUG, "Added %s revocation lookup directory", name);
     return 0; /* OK */
+}
+
+/* issue warnings on insecure/missing authentication */
+NOEXPORT void auth_warnings(SERVICE_OPTIONS *section) {
+#ifndef OPENSSL_NO_PSK
+    if(section->psk_keys)
+        return;
+#endif /* !defined(OPENSSL_NO_PSK) */
+    /* for servers it is usually okay to accept all client
+       certificates signed by a specified certificate authority */
+    if(!section->option.client)
+        return;
+    if(section->verify_level<2) {
+        s_log(LOG_WARNING,
+            "Service [%s] needs authentication to prevent MITM attacks",
+            section->servname);
+        return;
+    }
+    if(section->verify_level>=3) /* levels>=3 don't rely on PKI */
+        return;
+#if OPENSSL_VERSION_NUMBER>=0x10002000L
+    if(section->check_email || section->check_host || section->check_ip)
+        return;
+#endif /* OPENSSL_VERSION_NUMBER>=0x10002000L */
+    s_log(LOG_WARNING,
+        "Service [%s] uses \"verify = 2\" without subject checks",
+        section->servname);
+#if OPENSSL_VERSION_NUMBER<0x10002000L
+    s_log(LOG_WARNING,
+        "Rebuild your stunnel against OpenSSL version 1.0.2 or higher");
+#endif /* OPENSSL_VERSION_NUMBER<0x10002000L */
+    s_log(LOG_WARNING,
+        "Use \"checkHost\" or \"checkIP\" to restrict trusted certificates");
 }
 
 /**************************************** verify callback */
@@ -213,12 +235,6 @@ NOEXPORT int verify_checks(CLI *c,
 
     if(!cert_check(c, callback_ctx, preverify_ok)) {
         s_log(LOG_WARNING, "Rejected by CERT at depth=%d: %s", depth, subject);
-        str_free(subject);
-        return 0; /* reject */
-    }
-    if((c->opt->crl_file || c->opt->crl_dir) &&
-            !crl_check(c, callback_ctx)) {
-        s_log(LOG_WARNING, "Rejected by CRL at depth=%d: %s", depth, subject);
         str_free(subject);
         return 0; /* reject */
     }
@@ -367,120 +383,31 @@ NOEXPORT int compare_pubkeys(X509 *c1, X509 *c2) {
     return 1; /* accept */
 }
 
-/**************************************** CRL checking */
-
-/* based on the BSD-style licensed code of mod_ssl */
-NOEXPORT int crl_check(CLI *c, X509_STORE_CTX *callback_ctx) {
-    X509_STORE_CTX store_ctx;
-    X509_OBJECT obj;
-    X509_NAME *subject;
-    X509_NAME *issuer;
-    X509 *cert;
-    X509_CRL *crl;
-    X509_REVOKED *revoked;
-    EVP_PKEY *pubkey;
-    long serial;
-    int i, n, rc;
-    char *cp;
-    ASN1_TIME *last_update=NULL, *next_update=NULL;
-
-    cert=X509_STORE_CTX_get_current_cert(callback_ctx);
-    subject=X509_get_subject_name(cert);
-    issuer=X509_get_issuer_name(cert);
-
-    /* try to retrieve a CRL corresponding to the _subject_ of
-     * the current certificate in order to verify it's integrity */
-    X509_STORE_CTX_init(&store_ctx, c->opt->revocation_store, NULL, NULL);
-    memset((char *)&obj, 0, sizeof obj);
-    rc=X509_STORE_get_by_subject(&store_ctx, X509_LU_CRL, subject, &obj);
-    X509_STORE_CTX_cleanup(&store_ctx);
-    crl=obj.data.crl;
-    if(rc>0 && crl) {
-        cp=X509_NAME2text(subject);
-        s_log(LOG_INFO, "CRL: issuer: %s", cp);
-        str_free(cp);
-        last_update=X509_CRL_get_lastUpdate(crl);
-        next_update=X509_CRL_get_nextUpdate(crl);
-        log_time(LOG_INFO, "CRL: last update", last_update);
-        log_time(LOG_INFO, "CRL: next update", next_update);
-
-        /* verify the signature on this CRL */
-        pubkey=X509_get_pubkey(cert);
-        if(X509_CRL_verify(crl, pubkey)<=0) {
-            s_log(LOG_WARNING, "CRL: Invalid signature");
-            X509_STORE_CTX_set_error(callback_ctx,
-                X509_V_ERR_CRL_SIGNATURE_FAILURE);
-            X509_OBJECT_free_contents(&obj);
-            if(pubkey)
-                EVP_PKEY_free(pubkey);
-            return 0; /* reject */
-        }
-        if(pubkey)
-            EVP_PKEY_free(pubkey);
-
-        /* check date of CRL to make sure it's not expired */
-        if(!next_update) {
-            s_log(LOG_WARNING, "CRL: Invalid nextUpdate field");
-            X509_STORE_CTX_set_error(callback_ctx,
-                X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD);
-            X509_OBJECT_free_contents(&obj);
-            return 0; /* reject */
-        }
-        if(X509_cmp_current_time(next_update)<0) {
-            s_log(LOG_WARNING, "CRL: CRL Expired - revoking all certificates");
-            X509_STORE_CTX_set_error(callback_ctx, X509_V_ERR_CRL_HAS_EXPIRED);
-            X509_OBJECT_free_contents(&obj);
-            return 0; /* reject */
-        }
-        X509_OBJECT_free_contents(&obj);
-    }
-
-    /* try to retrieve a CRL corresponding to the _issuer_ of
-     * the current certificate in order to check for revocation */
-    memset((char *)&obj, 0, sizeof obj);
-    X509_STORE_CTX_init(&store_ctx, c->opt->revocation_store, NULL, NULL);
-    rc=X509_STORE_get_by_subject(&store_ctx, X509_LU_CRL, issuer, &obj);
-    X509_STORE_CTX_cleanup(&store_ctx);
-    crl=obj.data.crl;
-    if(rc>0 && crl) {
-        /* check if the current certificate is revoked by this CRL */
-        n=sk_X509_REVOKED_num(X509_CRL_get_REVOKED(crl));
-        for(i=0; i<n; i++) {
-            revoked=sk_X509_REVOKED_value(X509_CRL_get_REVOKED(crl), i);
-            if(ASN1_INTEGER_cmp(revoked->serialNumber,
-                    X509_get_serialNumber(cert))==0) {
-                serial=ASN1_INTEGER_get(revoked->serialNumber);
-                cp=X509_NAME2text(issuer);
-                s_log(LOG_WARNING, "CRL: Certificate with serial %ld (0x%lX) "
-                    "revoked per CRL from issuer %s", serial, serial, cp);
-                str_free(cp);
-                X509_STORE_CTX_set_error(callback_ctx, X509_V_ERR_CERT_REVOKED);
-                X509_OBJECT_free_contents(&obj);
-                return 0; /* reject */
-            }
-        }
-        X509_OBJECT_free_contents(&obj);
-    }
-    return 1; /* accept */
-}
+/**************************************** OCSP checking */
 
 #ifndef OPENSSL_NO_OCSP
 
-/**************************************** OCSP checking */
-
-/* type checks not available -- use generic functions */
+#ifdef DEFINE_STACK_OF
+/* defined in openssl/safestack.h:
+ * DEFINE_SPECIAL_STACK_OF(OPENSSL_STRING, char) */
+#else /* DEFINE_STACK_OF */
 #ifndef sk_OPENSSL_STRING_num
 #define sk_OPENSSL_STRING_num(st) sk_num(st)
-#endif
+#endif /* sk_OPENSSL_STRING_num */
 #ifndef sk_OPENSSL_STRING_value
 #define sk_OPENSSL_STRING_value(st, i) sk_value((st),(i))
-#endif
+#endif /* sk_OPENSSL_STRING_value */
+#endif /* DEFINE_STACK_OF */
 
 NOEXPORT int ocsp_check(CLI *c, X509_STORE_CTX *callback_ctx) {
     X509 *cert;
     OCSP_CERTID *cert_id;
     STACK_OF(OPENSSL_STRING) *aia;
-    int i, status=V_OCSP_CERTSTATUS_UNKNOWN;
+    int i, ocsp_status=V_OCSP_CERTSTATUS_UNKNOWN, saved_error;
+    char *url;
+
+    /* the original error code is restored unless we report our own error */
+    saved_error=X509_STORE_CTX_get_error(callback_ctx);
 
     /* get the current certificate ID */
     cert=X509_STORE_CTX_get_current_cert(callback_ctx);
@@ -505,7 +432,7 @@ NOEXPORT int ocsp_check(CLI *c, X509_STORE_CTX *callback_ctx) {
 
     /* use the responder specified in the configuration file */
     if(c->opt->ocsp_url) {
-        s_log(LOG_DEBUG, "OCSP: Connecting configured responder \"%s\"",
+        s_log(LOG_NOTICE, "OCSP: Connecting the configured responder \"%s\"",
             c->opt->ocsp_url);
         if(ocsp_request(c, callback_ctx, cert_id, c->opt->ocsp_url)!=
                 V_OCSP_CERTSTATUS_GOOD) {
@@ -517,21 +444,21 @@ NOEXPORT int ocsp_check(CLI *c, X509_STORE_CTX *callback_ctx) {
     /* use the responder from AIA (Authority Information Access) */
     if(c->opt->option.aia && (aia=X509_get1_ocsp(cert))) {
         for(i=0; i<sk_OPENSSL_STRING_num(aia); i++) {
-            s_log(LOG_DEBUG, "OCSP: Connecting AIA responder \"%s\"",
-                sk_OPENSSL_STRING_value(aia, i));
-            status=ocsp_request(c, callback_ctx, cert_id,
-                sk_OPENSSL_STRING_value(aia, i));
-            if(status!=V_OCSP_CERTSTATUS_UNKNOWN)
+            url=sk_OPENSSL_STRING_value(aia, i);
+            s_log(LOG_NOTICE, "OCSP: Connecting the AIA responder \"%s\"", url);
+            ocsp_status=ocsp_request(c, callback_ctx, cert_id, url);
+            if(ocsp_status!=V_OCSP_CERTSTATUS_UNKNOWN)
                 break; /* we received a definitive response */
         }
         X509_email_free(aia);
-        if(status!=V_OCSP_CERTSTATUS_GOOD) {
+        if(ocsp_status!=V_OCSP_CERTSTATUS_GOOD) {
             OCSP_CERTID_free(cert_id);
             return 0; /* reject */
         }
     }
 
     OCSP_CERTID_free(cert_id);
+    X509_STORE_CTX_set_error(callback_ctx, saved_error);
     return 1; /* accept */
 }
 
@@ -541,7 +468,8 @@ NOEXPORT int ocsp_check(CLI *c, X509_STORE_CTX *callback_ctx) {
  * V_OCSP_CERTSTATUS_UNKNOWN */
 NOEXPORT int ocsp_request(CLI *c, X509_STORE_CTX *callback_ctx,
         OCSP_CERTID *cert_id, char *url) {
-    int status=V_OCSP_CERTSTATUS_UNKNOWN;
+    int ocsp_status=V_OCSP_CERTSTATUS_UNKNOWN;
+    int response_status;
     int reason;
     int ctx_err=X509_V_ERR_APPLICATION_VERIFICATION;
     OCSP_REQUEST *request=NULL;
@@ -556,23 +484,23 @@ NOEXPORT int ocsp_request(CLI *c, X509_STORE_CTX *callback_ctx,
         sslerror("OCSP: OCSP_REQUEST_new");
         goto cleanup;
     }
-    if(!OCSP_request_add0_id(request, cert_id)) {
+    if(!OCSP_request_add0_id(request, OCSP_CERTID_dup(cert_id))) {
         sslerror("OCSP: OCSP_request_add0_id");
         goto cleanup;
     }
-    OCSP_request_add1_nonce(request, NULL, -1);
+    if(c->opt->option.nonce)
+        OCSP_request_add1_nonce(request, NULL, -1);
 
     /* send the request and get a response */
     response=ocsp_get_response(c, request, url);
     if(!response)
         goto cleanup;
-    status=OCSP_response_status(response);
-    if(status!=OCSP_RESPONSE_STATUS_SUCCESSFUL) {
-        s_log(LOG_WARNING, "OCSP: Responder error: %d: %s",
-            status, OCSP_response_status_str(status));
+    response_status=OCSP_response_status(response);
+    if(response_status!=OCSP_RESPONSE_STATUS_SUCCESSFUL) {
+        s_log(LOG_ERR, "OCSP: Responder error: %d: %s",
+            response_status, OCSP_response_status_str(response_status));
         goto cleanup;
     }
-    s_log(LOG_DEBUG, "OCSP: Response received");
 
     /* verify the response */
     basic_response=OCSP_response_get1_basic(response);
@@ -580,37 +508,38 @@ NOEXPORT int ocsp_request(CLI *c, X509_STORE_CTX *callback_ctx,
         sslerror("OCSP: OCSP_response_get1_basic");
         goto cleanup;
     }
-    if(OCSP_check_nonce(request, basic_response)<=0) {
-        s_log(LOG_WARNING, "OCSP: Invalid nonce");
+    if(c->opt->option.nonce && OCSP_check_nonce(request, basic_response)<=0) {
+        s_log(LOG_ERR, "OCSP: Invalid or unsupported nonce");
         goto cleanup;
     }
-    if(OCSP_basic_verify(basic_response, NULL,
-            c->opt->revocation_store, c->opt->ocsp_flags)<=0) {
+    if(OCSP_basic_verify(basic_response, X509_STORE_CTX_get_chain(callback_ctx),
+            SSL_CTX_get_cert_store(c->opt->ctx), c->opt->ocsp_flags)<=0) {
         sslerror("OCSP: OCSP_basic_verify");
         goto cleanup;
     }
-    if(!OCSP_resp_find_status(basic_response, cert_id, &status, &reason,
+    if(!OCSP_resp_find_status(basic_response, cert_id, &ocsp_status, &reason,
             &revoked_at, &this_update, &next_update)) {
         sslerror("OCSP: OCSP_resp_find_status");
         goto cleanup;
     }
-    s_log(LOG_NOTICE, "OCSP: Status: %s", OCSP_cert_status_str(status));
+    s_log(LOG_INFO, "OCSP: Status: %s", OCSP_cert_status_str(ocsp_status));
     log_time(LOG_INFO, "OCSP: This update", this_update);
     log_time(LOG_INFO, "OCSP: Next update", next_update);
     /* check if the response is valid for at least one minute */
     if(!OCSP_check_validity(this_update, next_update, 60, -1)) {
         sslerror("OCSP: OCSP_check_validity");
-        status=V_OCSP_CERTSTATUS_UNKNOWN;
+        ocsp_status=V_OCSP_CERTSTATUS_UNKNOWN;
         goto cleanup;
     }
-    switch(status) {
+    switch(ocsp_status) {
     case V_OCSP_CERTSTATUS_GOOD:
+        s_log(LOG_NOTICE, "OCSP: Certificate accepted");
         break;
     case V_OCSP_CERTSTATUS_REVOKED:
         if(reason==-1)
-            s_log(LOG_WARNING, "OCSP: Certificate revoked");
+            s_log(LOG_ERR, "OCSP: Certificate revoked");
         else
-            s_log(LOG_WARNING, "OCSP: Certificate revoked: %d: %s",
+            s_log(LOG_ERR, "OCSP: Certificate revoked: %d: %s",
                 reason, OCSP_crl_reason_str(reason));
         log_time(LOG_NOTICE, "OCSP: Revoked at", revoked_at);
         ctx_err=X509_V_ERR_CERT_REVOKED;
@@ -625,9 +554,9 @@ cleanup:
         OCSP_RESPONSE_free(response);
     if(basic_response)
         OCSP_BASICRESP_free(basic_response);
-    if(status!=V_OCSP_CERTSTATUS_GOOD)
+    if(ocsp_status!=V_OCSP_CERTSTATUS_GOOD)
         X509_STORE_CTX_set_error(callback_ctx, ctx_err);
-    return status;
+    return ocsp_status;
 }
 
 NOEXPORT OCSP_RESPONSE *ocsp_get_response(CLI *c,
@@ -635,7 +564,6 @@ NOEXPORT OCSP_RESPONSE *ocsp_get_response(CLI *c,
     BIO *bio=NULL;
     OCSP_REQ_CTX *req_ctx=NULL;
     OCSP_RESPONSE *resp=NULL;
-    int err;
     char *host=NULL, *port=NULL, *path=NULL;
     SOCKADDR_UNION addr;
     int ssl;
@@ -647,50 +575,74 @@ NOEXPORT OCSP_RESPONSE *ocsp_get_response(CLI *c,
     }
     if(ssl) {
         s_log(LOG_ERR, "OCSP: SSL not supported for OCSP"
-            " - additional stunnel service needs to be defined");
+            " - an additional stunnel service needs to be defined");
         goto cleanup;
     }
-    memset(&addr, 0, sizeof addr);
-    addr.in.sin_family=AF_INET;
-    if(!hostport2addr(&addr, host, port)) {
-        s_log(LOG_ERR, "OCSP: Failed to resolve the OCSP server address");
+    if(!hostport2addr(&addr, host, port, 0)) {
+        s_log(LOG_ERR, "OCSP: Failed to resolve the OCSP responder address");
         goto cleanup;
     }
 
-    /* connect specified OCSP server (responder) */
+    /* connect specified OCSP responder */
     c->fd=s_socket(addr.sa.sa_family, SOCK_STREAM, 0, 1, "OCSP: socket");
     if(c->fd==INVALID_SOCKET)
         goto cleanup;
     if(s_connect(c, &addr, addr_len(&addr)))
         goto cleanup;
     bio=BIO_new_socket((int)c->fd, BIO_NOCLOSE);
-    if(!bio)
+    if(!bio) {
+        sslerror("OCSP: BIO_new_socket");
         goto cleanup;
-    s_log(LOG_DEBUG, "OCSP: response retrieved");
+    }
+    s_log(LOG_DEBUG, "OCSP: Connected %s:%s", host, port);
 
-    /* OCSP protocol communication loop */
+    /* initialize an HTTP request with the POST method */
+#if OPENSSL_VERSION_NUMBER>=0x10000000L
+    req_ctx=OCSP_sendreq_new(bio, path, NULL, -1);
+#else
+    /* there is no way to send the Host header with older OpenSSL versions */
     req_ctx=OCSP_sendreq_new(bio, path, req, -1);
+#endif
     if(!req_ctx) {
         sslerror("OCSP: OCSP_sendreq_new");
         goto cleanup;
     }
+#if OPENSSL_VERSION_NUMBER>=0x10000000L
+    /* add the HTTP headers */
+    if(!OCSP_REQ_CTX_add1_header(req_ctx, "Host", host)) {
+        sslerror("OCSP: OCSP_REQ_CTX_add1_header");
+        goto cleanup;
+    }
+    if(!OCSP_REQ_CTX_add1_header(req_ctx, "User-Agent", "stunnel")) {
+        sslerror("OCSP: OCSP_REQ_CTX_add1_header");
+        goto cleanup;
+    }
+    /* add the remaining HTTP headers and the OCSP request body */
+    if(!OCSP_REQ_CTX_set1_req(req_ctx, req)) {
+        sslerror("OCSP: OCSP_REQ_CTX_set1_req");
+        goto cleanup;
+    }
+#endif
+
+    /* OCSP protocol communication loop */
     while(OCSP_sendreq_nbio(&resp, req_ctx)==-1) {
         s_poll_init(c->fds);
         s_poll_add(c->fds, c->fd, BIO_should_read(bio), BIO_should_write(bio));
-        err=s_poll_wait(c->fds, c->opt->timeout_busy, 0);
-        if(err==-1)
+        switch(s_poll_wait(c->fds, c->opt->timeout_busy, 0)) {
+        case -1:
             sockerror("OCSP: s_poll_wait");
-        if(err==0)
-            s_log(LOG_INFO, "OCSP: s_poll_wait: TIMEOUTbusy exceeded");
-        if(err<=0)
             goto cleanup;
+        case 0:
+            s_log(LOG_INFO, "OCSP: s_poll_wait: TIMEOUTbusy exceeded");
+            goto cleanup;
+        }
     }
 #if 0
     s_log(LOG_DEBUG, "OCSP: context state: 0x%x", *(int *)req_ctx);
 #endif
     /* http://www.mail-archive.com/openssl-users@openssl.org/msg61691.html */
     if(resp) {
-        s_log(LOG_DEBUG, "OCSP: request completed");
+        s_log(LOG_DEBUG, "OCSP: Response received");
     } else {
         if(ERR_peek_error())
             sslerror("OCSP: OCSP_sendreq_nbio");
@@ -728,31 +680,6 @@ NOEXPORT X509 *get_current_issuer(X509_STORE_CTX *callback_ctx) {
     return sk_X509_value(chain, depth);
 }
 
-#endif /* !defined(OPENSSL_NO_OCSP) */
-
-char *X509_NAME2text(X509_NAME *name) {
-    char *text;
-    BIO *bio;
-    int n;
-
-    bio=BIO_new(BIO_s_mem());
-    if(!bio)
-        return str_dup("BIO_new() failed");
-    X509_NAME_print_ex(bio, name, 0,
-        XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB & ~XN_FLAG_SPC_EQ);
-    n=BIO_pending(bio);
-    text=str_alloc((size_t)n+1);
-    n=BIO_read(bio, text, n);
-    if(n<0) {
-        BIO_free(bio);
-        str_free(text);
-        return str_dup("BIO_read() failed");
-    }
-    text[n]='\0';
-    BIO_free(bio);
-    return text;
-}
-
 NOEXPORT void log_time(const int level, const char *txt, ASN1_TIME *t) {
     char *cp;
     BIO *bio;
@@ -776,6 +703,51 @@ NOEXPORT void log_time(const int level, const char *txt, ASN1_TIME *t) {
     BIO_free(bio);
     s_log(level, "%s: %s", txt, cp);
     str_free(cp);
+}
+
+#endif /* !defined(OPENSSL_NO_OCSP) */
+
+void print_client_CA_list(const STACK_OF(X509_NAME) *ca_dn) {
+    char *ca_name;
+    int n, i;
+
+    if(!ca_dn) {
+        s_log(LOG_INFO, "No client CA list");
+        return;
+    }
+    n=sk_X509_NAME_num(ca_dn);
+    if(n==0) {
+        s_log(LOG_INFO, "Empty client CA list");
+        return;
+    }
+    for(i=0; i<n; ++i) {
+        ca_name=X509_NAME2text(sk_X509_NAME_value(ca_dn, i));
+        s_log(LOG_INFO, "Client CA: %s", ca_name);
+        str_free(ca_name);
+    }
+}
+
+char *X509_NAME2text(X509_NAME *name) {
+    char *text;
+    BIO *bio;
+    int n;
+
+    bio=BIO_new(BIO_s_mem());
+    if(!bio)
+        return str_dup("BIO_new() failed");
+    X509_NAME_print_ex(bio, name, 0,
+        XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB & ~XN_FLAG_SPC_EQ);
+    n=BIO_pending(bio);
+    text=str_alloc((size_t)n+1);
+    n=BIO_read(bio, text, n);
+    if(n<0) {
+        BIO_free(bio);
+        str_free(text);
+        return str_dup("BIO_read() failed");
+    }
+    text[n]='\0';
+    BIO_free(bio);
+    return text;
 }
 
 /* end of verify.c */

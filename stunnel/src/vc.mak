@@ -20,16 +20,13 @@ TARGET=win64
 # either install a precompiled version (*not* the "Light" one) from
 # http://www.slproweb.com/products/Win32OpenSSL.html
 #SSLDIR=C:\OpenSSL-Win32
-#INCDIR=$(SSLDIR)\include
-#LIBDIR=$(SSLDIR)\lib
 # or compile one yourself
-SSLDIR=..\..\openssl-1.0.2a-$(TARGET)
-INCDIR=$(SSLDIR)\inc32
-LIBDIR=$(SSLDIR)\out32dll
+SSLDIR=\devel\$(TARGET)\openssl
 # or simply install with "nmake -f ms\ntdll.mak install"
 #SSLDIR=\usr\local\ssl
-#INCDIR=$(SSLDIR)\include
-#LIBDIR=$(SSLDIR)\lib
+
+INCDIR=$(SSLDIR)\include
+LIBDIR=$(SSLDIR)\lib
 
 SRC=..\src
 OBJROOT=..\obj
@@ -41,7 +38,8 @@ SHAREDOBJS=$(OBJ)\stunnel.obj $(OBJ)\ssl.obj $(OBJ)\ctx.obj \
 	$(OBJ)\verify.obj $(OBJ)\file.obj $(OBJ)\client.obj \
 	$(OBJ)\protocol.obj $(OBJ)\sthreads.obj $(OBJ)\log.obj \
 	$(OBJ)\options.obj $(OBJ)\network.obj $(OBJ)\resolver.obj \
- 	$(OBJ)\str.obj $(OBJ)\tls.obj $(OBJ)\fd.obj
+	$(OBJ)\str.obj $(OBJ)\tls.obj $(OBJ)\fd.obj $(OBJ)\dhparam.obj \
+	$(OBJ)\cron.obj
 GUIOBJS=$(OBJ)\ui_win_gui.obj $(OBJ)\resources.res
 CLIOBJS=$(OBJ)\ui_win_cli.obj
 
@@ -50,7 +48,7 @@ LINK=link
 
 UNICODEFLAGS=/DUNICODE /D_UNICODE
 CFLAGS=/MD /W3 /O2 /nologo /I"$(INCDIR)" $(UNICODEFLAGS)
-LDFLAGS=/NOLOGO
+LDFLAGS=/NOLOGO /DEBUG
 
 SHAREDLIBS=ws2_32.lib user32.lib shell32.lib
 GUILIBS=advapi32.lib comdlg32.lib crypt32.lib gdi32.lib psapi.lib

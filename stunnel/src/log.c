@@ -1,6 +1,6 @@
 /*
  *   stunnel       TLS offloading and load-balancing proxy
- *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2016 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -57,7 +57,7 @@ static int syslog_opened=0;
 
 void syslog_open(void) {
     syslog_close();
-    if(global_options.option.syslog)
+    if(global_options.option.log_syslog)
 #ifdef __ultrix__
         openlog(service_options.servname, 0);
 #else
@@ -69,7 +69,7 @@ void syslog_open(void) {
 
 void syslog_close(void) {
     if(syslog_opened) {
-        if(global_options.option.syslog)
+        if(global_options.option.log_syslog)
             closelog();
         syslog_opened=0;
     }
@@ -120,7 +120,7 @@ void log_flush(LOG_MODE new_mode) {
     if(mode!=LOG_MODE_CONFIGURED)
         mode=new_mode;
 
-    enter_critical_section(CRIT_LOG);
+    CRYPTO_w_lock(stunnel_locks[LOCK_LOG]);
     while(head) {
         log_raw(head->opt, head->level, head->stamp, head->id, head->text);
         str_free(head->stamp);
@@ -130,7 +130,7 @@ void log_flush(LOG_MODE new_mode) {
         head=head->next;
         str_free(tmp);
     }
-    leave_critical_section(CRIT_LOG);
+    CRYPTO_w_unlock(stunnel_locks[LOCK_LOG]);
     head=tail=NULL;
 }
 
@@ -184,7 +184,7 @@ void s_log(int level, const char *format, ...) {
     safestring(text);
 
     if(mode==LOG_MODE_NONE) { /* save the text to log it later */
-        enter_critical_section(CRIT_LOG);
+        CRYPTO_w_lock(stunnel_locks[LOCK_LOG]);
         tmp=str_alloc_detached(sizeof(struct LIST));
         tmp->next=NULL;
         tmp->opt=tls_data->opt;
@@ -200,7 +200,7 @@ void s_log(int level, const char *format, ...) {
         else
             head=tmp;
         tail=tmp;
-        leave_critical_section(CRIT_LOG);
+        CRYPTO_w_unlock(stunnel_locks[LOCK_LOG]);
     } else { /* ready log the text directly */
         log_raw(tls_data->opt, level, stamp, id, text);
         str_free(stamp);
@@ -222,14 +222,14 @@ NOEXPORT void log_raw(const SERVICE_OPTIONS *opt,
         line=str_printf("%s %s: %s", stamp, id, text);
         if(level<=opt->log_level) {
 #if !defined(USE_WIN32) && !defined(__vms)
-            if(global_options.option.syslog)
+            if(global_options.option.log_syslog)
                 syslog(level, "%s: %s", id, text);
 #endif /* USE_WIN32, __vms */
             if(outfile)
                 file_putline(outfile, line); /* send log to file */
         }
     } else if(mode==LOG_MODE_ERROR) {
-        if(level>=0 || level<=7) /* just in case */
+        if(level>=0 && level<=7) /* just in case */
             line=str_printf("[%c] %s", "***!:.  "[level], text);
         else
             line=str_printf("[?] %s", text);
@@ -243,7 +243,7 @@ NOEXPORT void log_raw(const SERVICE_OPTIONS *opt,
             level<=opt->log_level
 #else
             (level<=opt->log_level &&
-            global_options.option.foreground)
+            global_options.option.log_stderr)
 #endif
             )
         ui_new_log(line);
@@ -251,9 +251,12 @@ NOEXPORT void log_raw(const SERVICE_OPTIONS *opt,
     str_free(line);
 }
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat"
+#pragma GCC diagnostic ignored "-Wformat-extra-args"
+#endif /* __GNUC__ */
 char *log_id(CLI *c) {
-    static volatile unsigned long long seq=0;
-    unsigned long long my_seq;
     const char table[62]=
         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     unsigned char rnd[22];
@@ -262,19 +265,8 @@ char *log_id(CLI *c) {
     unsigned long tid;
 
     switch(c->opt->log_id) {
-    case LOG_ID_SEQENTIAL:
-        enter_critical_section(CRIT_ID);
-        my_seq=seq++;
-        leave_critical_section(CRIT_ID);
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat"
-#pragma GCC diagnostic ignored "-Wformat-extra-args"
-#endif /* __GNUC__ */
-        return str_printf("%llu", my_seq);
-#ifdef __GNUC__
-#pragma GCC diagnostic pop
-#endif /* __GNUC__ */
+    case LOG_ID_SEQUENTIAL:
+        return str_printf("%llu", c->seq);
     case LOG_ID_UNIQUE:
         if(RAND_bytes(rnd, sizeof rnd)<=0) /* log2(62^22)=130.99 */
             return str_dup("error");
@@ -299,6 +291,9 @@ char *log_id(CLI *c) {
     }
     return str_dup("error");
 }
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif /* __GNUC__ */
 
 /* critical problem handling */
 /* str.c functions are not safe to use here */
@@ -320,7 +315,7 @@ void fatal_debug(char *txt, const char *file, int line) {
 
     if(outfile) {
 #ifdef USE_WIN32
-        WriteFile(outfile->fh, msg, strlen(msg), &num, NULL);
+        WriteFile(outfile->fh, msg, (DWORD)strlen(msg), &num, NULL);
 #else /* USE_WIN32 */
         /* no file -> write to stderr */
         /* no meaningful way here to handle the result */
@@ -329,7 +324,7 @@ void fatal_debug(char *txt, const char *file, int line) {
     }
 
 #ifndef USE_WIN32
-    if(mode!=LOG_MODE_CONFIGURED || global_options.option.foreground) {
+    if(mode!=LOG_MODE_CONFIGURED || global_options.option.log_stderr) {
         fputs(msg, stderr);
         fflush(stderr);
     }
@@ -339,7 +334,7 @@ void fatal_debug(char *txt, const char *file, int line) {
         "INTERNAL ERROR: %s at %s, line %d", txt, file, line);
 
 #if !defined(USE_WIN32) && !defined(__vms)
-    if(global_options.option.syslog)
+    if(global_options.option.log_syslog)
         syslog(LOG_CRIT, "%s", msg);
 #endif /* USE_WIN32, __vms */
 
@@ -486,7 +481,7 @@ char *s_strerror(int errnum) {
 /* replace non-UTF-8 and non-printable control characters with '.' */
 NOEXPORT void safestring(char *c) {
     for(; *c; ++c)
-        if(!(*c&0x80 || isprint(*c)))
+        if(!(*c&0x80 || isprint((int)*c)))
             *c='.';
 }
 

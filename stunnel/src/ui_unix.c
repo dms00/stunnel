@@ -1,6 +1,6 @@
 /*
  *   stunnel       TLS offloading and load-balancing proxy
- *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2016 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -61,6 +61,8 @@ int main(int argc, char* argv[]) { /* execution begins here 8-) */
 }
 
 NOEXPORT int main_unix(int argc, char* argv[]) {
+    int configure_status;
+
 #if !defined(__vms) && !defined(USE_OS2)
     int fd;
 
@@ -69,9 +71,15 @@ NOEXPORT int main_unix(int argc, char* argv[]) {
         fatal("Could not open /dev/null");
 #endif
     main_init();
-    if(main_configure(argc>1 ? argv[1] : NULL, argc>2 ? argv[2] : NULL)) {
+    configure_status=main_configure(argc>1 ? argv[1] : NULL,
+        argc>2 ? argv[2] : NULL);
+    switch(configure_status) {
+    case 1: /* error -> exit with 1 to indicate error */
         close(fd);
         return 1;
+    case 2: /* information printed -> exit with 0 to indicate success */
+        close(fd);
+        return 0;
     }
     if(service_options.next) { /* there are service sections -> daemon mode */
 #if !defined(__vms) && !defined(USE_OS2)
@@ -215,12 +223,12 @@ void ui_config_reloaded(void) {
 #ifdef ICON_IMAGE
 
 ICON_IMAGE load_icon_default(ICON_TYPE icon) {
-    (void)icon; /* skip warning about unused parameter */
+    (void)icon; /* squash the unused parameter warning */
     return (ICON_IMAGE)0;
 }
 
 ICON_IMAGE load_icon_file(const char *file) {
-    (void)file; /* skip warning about unused parameter */
+    (void)file; /* squash the unused parameter warning */
     return (ICON_IMAGE)0;
 }
 
@@ -229,11 +237,11 @@ ICON_IMAGE load_icon_file(const char *file) {
 /**************************************** client callbacks */
 
 void ui_new_chain(const unsigned section_number) {
-    (void)section_number; /* skip warning about unused parameter */
+    (void)section_number; /* squash the unused parameter warning */
 }
 
 void ui_clients(const long num) {
-    (void)num; /* skip warning about unused parameter */
+    (void)num; /* squash the unused parameter warning */
 }
 
 /**************************************** s_log callbacks */
@@ -245,17 +253,17 @@ void ui_new_log(const char *line) {
 /**************************************** ctx callbacks */
 
 int passwd_cb(char *buf, int size, int rwflag, void *userdata) {
-    (void)buf; /* skip warning about unused parameter */
-    (void)size; /* skip warning about unused parameter */
-    (void)rwflag; /* skip warning about unused parameter */
-    (void)userdata; /* skip warning about unused parameter */
+    (void)buf; /* squash the unused parameter warning */
+    (void)size; /* squash the unused parameter warning */
+    (void)rwflag; /* squash the unused parameter warning */
+    (void)userdata; /* squash the unused parameter warning */
     return 0; /* not implemented */
 }
 
 #ifndef OPENSSL_NO_ENGINE
 int pin_cb(UI *ui, UI_STRING *uis) {
-    (void)ui; /* skip warning about unused parameter */
-    (void)uis; /* skip warning about unused parameter */
+    (void)ui; /* squash the unused parameter warning */
+    (void)uis; /* squash the unused parameter warning */
     return 0; /* not implemented */
 }
 #endif

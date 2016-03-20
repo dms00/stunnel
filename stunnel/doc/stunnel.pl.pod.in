@@ -174,7 +174,7 @@ niektóre inne pliki mogą potrzebować plików urządzeń, np. /dev/zero lub /d
 
 =back
 
-=item B<compression> = deflate | zlib | rle
+=item B<compression> = deflate | zlib
 
 wybór algorytmu kompresji przesyłanych danych
 
@@ -184,8 +184,6 @@ Algorytm deflate jest standardową metodą kompresji zgodnie z RFC 1951.
 
 Kompresja zlib zaimplementowana w B<OpenSSL 0.9.8> i nowszych nie jest
 kompatybilna implementacją B<OpenSSL 0.9.7>.
-
-Kompresja rle nie jest zaimplementowana w aktualnych wersjach B<OpenSSL>.
 
 =item B<debug> = [PODSYSTEM].POZIOM
 
@@ -217,27 +215,25 @@ wybór sprzętowego urządzenia kryptograficznego
 
 domyślnie: bez wykorzystania urządzeń kryptograficznych
 
-Przykładowa konfiguracja umożliwiająca odczytanie klucza prywatnego z
+Przykładowa konfiguracja umożliwiająca użycie certyfikatu i klucza prywatnego z
 urządzenia zgodnego z OpenSC:
 
-    engine=dynamic
-    engineCtrl=SO_PATH:/usr/lib/opensc/engine_pkcs11.so
-    engineCtrl=ID:pkcs11
-    engineCtrl=LIST_ADD:1
-    engineCtrl=LOAD
-    engineCtrl=MODULE_PATH:/usr/lib/pkcs11/opensc-pkcs11.so
-    engineCtrl=INIT
+    engine = dynamic
+    engineCtrl = SO_PATH:/usr/local/lib/engines/libpkcs11.so
+    engineCtrl = LOAD
+    engineCtrl = MODULE_PATH:opensc-pkcs11.so
+    engineCtrl = PIN:123456
 
     [service]
-    engineNum=1
-    key=id_45
+    engineId = pkcs11
+    cert = id_45
 
 =item B<engineCtrl> = KOMENDA[:PARAMETR]
 
 konfiguracja urządzenia kryptograficznego
 
-Specjalne komendy "LOAD" i "INIT" pozwalają na załadowanie i inicjalizację
-modułu kryptograficznego urządzenia.
+Specjalna komenda "LOAD" pozwala na załadowanie modułu urządzenia
+kryptograficznego.
 
 =item B<engineDefault> = LISTA_ZADAŃ
 
@@ -259,13 +255,15 @@ skompilowany ze wsparciem dla FIPS 140-2.
 
 domyślnie: no (od wersji 5.00)
 
-=item B<foreground> = yes | no (tylko Unix)
+=item B<foreground> = yes | quiet | no (tylko Unix)
 
 tryb pierwszoplanowy
 
-Użycie tej opcji powoduje, że B<stunnel> nie przechodzi w tło logując
-swoje komunikaty na konsolę zamiast przez I<syslog> (o ile nie użyto
-opcji I<output>).
+Użycie tej opcji powoduje, że B<stunnel> nie przechodzi w tło.
+
+Parametr I<yes> powoduje dodatkowo, że komunikaty diagnostyczne logowane są na
+standardowy strumień błędów (stderr) oprócz wyjść zdefiniowanych przy pomocy
+opcji I<syslog> i I<output>.
 
 =item B<iconActive> = PLIK_Z_IKONKĄ (tylko GUI)
 
@@ -345,14 +343,6 @@ użyć tej opcji w trybie w sekcji usług, to jest ona użyteczna jedynie w opcj
 globalnych.
 
 domyślnie: stunnel
-
-=item B<setgid> = IDENTYFIKATOR_GRUPY (tylko Unix)
-
-grupa z której prawami pracował będzie B<stunnel>
-
-=item B<setuid> = IDENTYFIKATOR_UŻYTKOWNIKA (tylko Unix)
-
-użytkownik, z którego prawami pracował będzie B<stunnel>
 
 =item B<socket> = a|l|r:OPCJA=WARTOŚĆ[:WARTOŚĆ]
 
@@ -447,6 +437,9 @@ program B<stunnel> do uwierzytelnienia się przed drugą stroną połączenia.
 Certyfikat jest konieczny, aby używać programu w trybie serwera.
 W trybie klienta certyfikat jest opcjonalny.
 
+Jeżeli używane jest sprzętowe urządzenie kryptograficzne, to opcja B<cert>
+pozwala wybrać identyfikator używanego certyfikatu.
+
 =item B<checkEmail> = EMAIL
 
 adres email przedstawionego certyfikatu
@@ -455,6 +448,8 @@ Pojedyncza sekcja może zawierać wiele wystąpień opcji B<checkEmail>.
 Certyfikaty są akceptowane, jeżeli sekcja nie zawiera opcji B<checkEmail>,
 albo adres email przedstawionego certyfikatu pasuje do jednego z adresów
 email określonych przy pomocy B<checkEmail>.
+
+Opcja ta wymaga biblioteki OpenSSL w wersji 1.0.2 lub nowszej.
 
 =item B<checkHost> = NAZWA_SERWERA
 
@@ -465,6 +460,8 @@ Certyfikaty są akceptowane, jeżeli sekcja nie zawiera opcji B<checkHost>, albo
 nazwa serwera przedstawionego certyfikatu pasuje do jednego nazw określonych
 przy pomocy B<checkHost>.
 
+Opcja ta wymaga biblioteki OpenSSL w wersji 1.0.2 lub nowszej.
+
 =item B<checkIP> = IP
 
 adres IP przedstawionego certyfikatu
@@ -473,6 +470,8 @@ Pojedyncza sekcja może zawierać wiele wystąpień opcji B<checkIP>.  Certyfika
 są akceptowane, jeżeli sekcja nie zawiera opcji B<checkIP>, albo adres IP
 przedstawionego certyfikatu pasuje do jednego z adresów IP określonych przy
 pomocy B<checkIP>.
+
+Opcja ta wymaga biblioteki OpenSSL w wersji 1.0.2 lub nowszej.
 
 =item B<ciphers> = LISTA_SZYFRÓW
 
@@ -487,6 +486,20 @@ tryb kliencki (zdalna usługa używa SSL)
 
 domyślnie: no (tryb serwerowy)
 
+=item B<config> = KOMENDA[:PARAMETR]
+
+komenda konfiguracyjna B<OpenSSL>
+
+Komenda konfiguracyjna B<OpenSSL> zostaje wykonana z podanym parametrem.
+Pozwala to na wydawanie komend konfiguracyjnych B<OpenSSL> z pliku
+konfiguracyjnego stunnela.  Dostępne komendy opisane są w manualu
+I<SSL_CONF_cmd(3ssl)>.
+
+Możliwe jest wyspecyfikowanie wielu opcji B<OpenSSL> przez wielokrotne użycie
+komendy B<config>.
+
+Opcja ta wymaga biblioteki OpenSSL w wersji 1.0.2 lub nowszej.
+
 =item B<connect> = [HOST:]PORT
 
 połącz się ze zdalnym serwerem na podany port
@@ -494,7 +507,7 @@ połącz się ze zdalnym serwerem na podany port
 Jeżeli nie został podany adres, B<stunnel> domyślnie łączy się
 z lokalnym serwerem.
 
-Komenda może byc użyta wielokrotnie w pojedynczej sekcji
+Komenda może być użyta wielokrotnie w pojedynczej sekcji
 celem zapewnienia wysokiej niezawodności lub rozłożenia
 ruchu pomiędzy wiele serwerów.
 
@@ -629,6 +642,12 @@ domyślnie: rr
 
 weryfikuj nazwę zdalnego użytkownika korzystając z protokołu IDENT (RFC 1413)
 
+=item B<include> = KATALOG
+
+wczytaj fragmenty plików konfiguracyjnych z podanego katalogu
+
+Pliki są wczytywane w rosnącej kolejności alfabetycznej ich nazw.
+
 =item B<key> = PLIK_KLUCZA
 
 klucz prywatny do certyfikatu podanego w opcji I<cert>
@@ -639,6 +658,9 @@ powinien mieć wyłącznie właściciel pliku.  W systemie Unix można to osiąg
 komendą:
 
     chmod 600 keyfile
+
+Jeżeli używane jest sprzętowe urządzenie kryptograficzne, to opcja B<key>
+pozwala wybrać identyfikator używanego klucza prywatnego.
 
 domyślnie: wartość opcji I<cert>
 
@@ -689,23 +711,32 @@ Opcja I<sni> jest dostępna począwszy od B<OpenSSL 1.0.0>.
 
 =item B<OCSP> = URL
 
-serwer OCSP do weryfikacji certyfikatów
+responder OCSP do weryfikacji certyfikatów
 
 =item B<OCSPaia> = yes | no
 
 weryfikuj certyfikaty przy użyciu respondertów AIA
 
 Opcja I<OCSPaia> pozwala na weryfikowanie certyfikatów przy pomocy listy URLi
-serwerów OCSP przesłanych w rozszerzeniach AIA (Authority Information Access).
+responderów OCSP przesłanych w rozszerzeniach AIA (Authority Information Access).
 
 =item B<OCSPflag> = FLAGA_OCSP
 
-flaga serwera OCSP
+flaga respondera OCSP
 
 aktualnie wspierane flagi: NOCERTS, NOINTERN NOSIGS, NOCHAIN, NOVERIFY,
 NOEXPLICIT, NOCASIGN, NODELEGATED, NOCHECKS, TRUSTOTHER, RESPID_KEY, NOTIME
 
 Aby wyspecyfikować kilka flag należy użyć I<OCSPflag> wielokrotnie.
+
+=item B<OCSPnonce> = yes | no
+
+wysyłaj i weryfikuj OCSP nonce
+
+Opcja B<OCSPnonce> zabezpiecza protokół OCSP przed atakami powtórzeniowymi.
+Ze względu na złożoność obliczeniową rozszerzenie nonce jest zwykle wspierane
+jedynie przez wewnętrzne (np. korporacyjne), a nie przez publiczne respondery
+OCSP.
 
 =item B<options> = OPCJE_SSL
 
@@ -796,13 +827,23 @@ w oparciu o szyfrowany protokół SOCKS.
 
 =back
 
-=item B<protocolAuthentication> = basic | ntlm
+=item B<protocolAuthentication> = UWIERZYTELNIENIE
 
 rodzaj uwierzytelnienia do negocjacji protokołu
 
-Obecnie typ uwierzytelnienia ma zastosowanie wyłącznie w protokole 'connect'.
+Opcja ta jest wpierana wyłącznie w klienckich protokołach 'connect' i 'smtp'.
 
-domyślnie: basic
+W protokole 'connect' wspierane jest uwierzytelnienie 'basic' oraz 'ntlm'.
+Domyślnym rodzajem uwierzytelnienia protokołu 'connect' jest 'basic'.
+
+W protokole 'smtp' wspierane jest uwierzytelnienie 'plain' oraz 'login'.
+Domyślnym rodzajem uwierzytelnienia protokołu 'smtp' jest 'plain'.
+
+=item B<protocolDomain> = DOMENA
+
+domena do negocjacji protokołu
+
+W obecnej wersji wybrana domena ma zastosowanie wyłącznie w protokole 'connect'.
 
 =item B<protocolHost> = HOST:PORT
 
@@ -819,9 +860,13 @@ W obecnej wersji adres docelowy protokołu ma zastosowanie wyłącznie w protoko
 
 hasło do negocjacji protokołu
 
+Opcja ta jest wspierana wyłącznie w klienckich protokołach 'connect' i 'smtp'.
+
 =item B<protocolUsername> = UŻYTKOWNIK
 
 nazwa użytkownika do negocjacji protokołu
+
+Opcja ta jest wspierana wyłącznie w klienckich protokołach 'connect' i 'smtp'.
 
 =item B<PSKidentity> = TOŻSAMOŚĆ
 
@@ -886,6 +931,22 @@ połącz ponownie sekcję connect+exec po rozłączeniu
 
 domyślnie: no
 
+=item B<setgid> = IDENTYFIKATOR_GRUPY (tylko Unix)
+
+identyfikator grupy Unix
+
+Jako opcja globalna: grupa, z której prawami pracował będzie B<stunnel>.
+
+Jako opcja usługi: grupa gniazda Unix utworzonego przy pomocy opcji "accept".
+
+=item B<setuid> = IDENTYFIKATOR_UŻYTKOWNIKA (tylko Unix)
+
+identyfikator użytkownika Unix
+
+Jako opcja globalna: użytkownik, z którego prawami pracował będzie B<stunnel>.
+
+Jako opcja usługi: właściciel gniazda Unix utworzonego przy pomocy opcji "accept".
+
 =item B<sessionCacheSize> = LICZBA_POZYCJI_CACHE
 
 rozmiar pamięci podręcznej sesji SSL
@@ -912,7 +973,14 @@ adres sessiond - servera cache sesji SSL
 
 wersja protokołu SSL
 
-Dozwolone opcje: all, SSLv2, SSLv3, TLSv1, TLSv1.1, TLSv1.2
+Wspierane opcje: all, SSLv2, SSLv3, TLSv1, TLSv1.1, TLSv1.2
+
+Dostępność konkretnych protokołów zależy od użytej wersji OpenSSL.
+Starsze wersje OpenSSL nie wspierają TLSv1.1 i TLSv1.2.
+Nowsze wersje OpenSSL nie wspierają SSLv2.
+
+Przestarzałe protokoły SSLv2 i SSLv3 są domyślnie wyłączone.
+Szczegółowe informacje dostępne są w opisie opcji B<options>.
 
 =item B<stack> = LICZBA_BAJTÓW (z wyjątkiem modelu FORK)
 
@@ -998,9 +1066,9 @@ Oryginalny adres docelowy jest używany zamiast opcji I<connect>.
 Przykładowana konfiguracja przezroczystego adresu docelowego:
 
     [transparent]
-    client=yes
-    accept=<port_stunnela>
-    transparent=destination
+    client = yes
+    accept = <port_stunnela>
+    transparent = destination
 
 Konfiguracja wymaga ustawień iptables, na przykład w pliku
 /etc/rc.local lub analogicznym.
@@ -1221,8 +1289,8 @@ programów są inetd, xinetd i tcpserver.
 
 Przykładowa linia pliku /etc/inetd.conf może wyglądać tak:
 
-    imaps stream tcp nowait root /usr/bin/stunnel
-        stunnel /etc/stunnel/imaps.conf
+    imaps stream tcp nowait root @bindir@/stunnel
+        stunnel @sysconfdir@/stunnel/imaps.conf
 
 Ponieważ w takich przypadkach połączenie na zdefiniowanym porcie
 (tutaj I<imaps>) nawiązuje osobny program (tutaj I<inetd>), B<stunnel>
@@ -1334,20 +1402,21 @@ B<stunnel>.
 =head2 PARAMETRY DH
 
 Począwszy od wersji 4.40 B<stunnel> zawiera w kodzie programu 2048-bitowe
-parametry DH.
+parametry DH.  Od wersji 5.18 te początkowe wartości parametrów DH są
+wymieniane na autogenerowane parametry tymczasowe.
+Wygenerowanie parametrów DH może zająć nawet wiele minut.
 
-Alternatywnie parametry DH można umieścić w pliku razem z certyfikatem:
+Alternatywnie parametry DH można umieścić w pliku razem z certyfikatem,
+co wyłącza generowanie parametrów tymczasowych:
 
     openssl dhparam 2048 >> stunnel.pem
-
-Wygenerowanie parametrów DH może zająć nawet wiele minut.
 
 
 =head1 PLIKI
 
 =over 4
 
-=item F<stunnel.conf>
+=item F<@sysconfdir@/stunnel/stunnel.conf>
 
 plik konfiguracyjny programu
 
@@ -1392,3 +1461,5 @@ strona projektu B<OpenSSL>
 
 =back
 
+=for comment
+vim:spelllang=pl:spell

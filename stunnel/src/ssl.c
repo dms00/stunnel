@@ -1,6 +1,6 @@
 /*
  *   stunnel       TLS offloading and load-balancing proxy
- *   Copyright (C) 1998-2015 Michal Trojnara <Michal.Trojnara@mirt.net>
+ *   Copyright (C) 1998-2016 Michal Trojnara <Michal.Trojnara@mirt.net>
  *
  *   This program is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU General Public License as published by the
@@ -38,7 +38,7 @@
 #include "common.h"
 #include "prototypes.h"
 
-    /* global OpenSSL initalization: compression, engine, entropy */
+    /* global OpenSSL initialization: compression, engine, entropy */
 NOEXPORT void cb_free(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
     int idx, long argl, void *argp);
 #ifndef OPENSSL_NO_COMP
@@ -67,15 +67,22 @@ int ssl_init(void) { /* init SSL before parsing configuration file */
 #ifndef OPENSSL_NO_ENGINE
     ENGINE_load_builtin_engines();
 #endif
+#ifndef OPENSSL_NO_DH
+    dh_params=get_dh2048();
+    if(!dh_params) {
+        s_log(LOG_ERR, "Failed to get default DH parameters");
+        return 1;
+    }
+#endif /* OPENSSL_NO_DH */
     return 0;
 }
 
 NOEXPORT void cb_free(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
         int idx, long argl, void *argp) {
-    (void)parent; /* skip warning about unused parameter */
-    (void)ad; /* skip warning about unused parameter */
-    (void)idx; /* skip warning about unused parameter */
-    (void)argl; /* skip warning about unused parameter */
+    (void)parent; /* squash the unused parameter warning */
+    (void)ad; /* squash the unused parameter warning */
+    (void)idx; /* squash the unused parameter warning */
+    (void)argl; /* squash the unused parameter warning */
     s_log(LOG_DEBUG, "Deallocating application specific data for %s",
         (char *)argp);
     str_free(ptr);
@@ -120,7 +127,7 @@ NOEXPORT int compression_init(GLOBAL_OPTIONS *global) {
     }
 
     if(global->compression==COMP_NONE ||
-            SSLeay()<0x00908051L /* 0.9.8e-beta1 */) {
+            OpenSSL_version_num()<0x00908051L /* 0.9.8e-beta1 */) {
         /* delete OpenSSL defaults (empty the SSL_COMP stack) */
         /* cannot use sk_SSL_COMP_pop_free,
          * as it also destroys the stack itself */
@@ -129,7 +136,12 @@ NOEXPORT int compression_init(GLOBAL_OPTIONS *global) {
         /* only allow DEFLATE with OpenSSL 0.9.8 or later
          * with OpenSSL #1468 zlib memory leak fixed */
         while(sk_SSL_COMP_num(methods))
+#if OPENSSL_VERSION_NUMBER>=0x10100000L
+            /* FIXME: remove when sk_SSL_COMP_pop() works again */
+            OPENSSL_free(sk_pop((void *)methods));
+#else
             OPENSSL_free(sk_SSL_COMP_pop(methods));
+#endif
     }
 
     if(global->compression==COMP_NONE) {
@@ -137,13 +149,19 @@ NOEXPORT int compression_init(GLOBAL_OPTIONS *global) {
         return 0; /* success */
     }
 
-    /* also insert one of obsolete (ZLIB/RLE) algorithms */
+    /* also insert the obsolete ZLIB algorithm */
     if(global->compression==COMP_ZLIB) {
         /* 224 - within the private range (193 to 255) */
-        SSL_COMP_add_compression_method(0xe0, COMP_zlib());
-    } else if(global->compression==COMP_RLE) {
-        /* 225 - within the private range (193 to 255) */
-        SSL_COMP_add_compression_method(0xe1, COMP_rle());
+        COMP_METHOD *meth=COMP_zlib();
+#if OPENSSL_VERSION_NUMBER>=0x10100000L
+        if(!meth || COMP_get_type(meth)==NID_undef) {
+#else
+        if(!meth || meth->type==NID_undef) {
+#endif
+            s_log(LOG_ERR, "ZLIB compression is not supported");
+            return 1;
+        }
+        SSL_COMP_add_compression_method(0xe0, meth);
     }
     s_log(LOG_INFO, "Compression enabled: %d method(s)",
         sk_SSL_COMP_num(methods));
@@ -154,9 +172,6 @@ NOEXPORT int compression_init(GLOBAL_OPTIONS *global) {
 NOEXPORT int prng_init(GLOBAL_OPTIONS *global) {
     int totbytes=0;
     char filename[256];
-#ifndef USE_WIN32
-    int bytes;
-#endif
 
     filename[0]='\0';
 
@@ -190,8 +205,10 @@ NOEXPORT int prng_init(GLOBAL_OPTIONS *global) {
     }
     s_log(LOG_DEBUG, "RAND_screen failed to sufficiently seed PRNG");
 #else
+#ifndef OPENSSL_NO_EGD
     if(global->egd_sock) {
-        if((bytes=RAND_egd(global->egd_sock))==-1) {
+        int bytes=RAND_egd(global->egd_sock);
+        if(bytes==-1) {
             s_log(LOG_WARNING, "EGD Socket %s failed", global->egd_sock);
             bytes=0;
         } else {
@@ -202,6 +219,7 @@ NOEXPORT int prng_init(GLOBAL_OPTIONS *global) {
                          so no need to check if seeded sufficiently */
         }
     }
+#endif
     /* try the good-old default /dev/urandom, if available  */
     totbytes+=add_rand_file(global, "/dev/urandom");
     if(RAND_status())
@@ -228,7 +246,7 @@ NOEXPORT int add_rand_file(GLOBAL_OPTIONS *global, const char *filename) {
         s_log(LOG_INFO, "Cannot retrieve any random data from %s",
             filename);
     /* write new random data for future seeding if it's a regular file */
-    if(global->option.rand_write && (sb.st_mode & S_IFREG)) {
+    if(global->option.rand_write && S_ISREG(sb.st_mode)) {
         writebytes=RAND_write_file(filename);
         if(writebytes==-1)
             s_log(LOG_WARNING, "Failed to write strong random data to %s - "
